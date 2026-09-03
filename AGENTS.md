@@ -24,7 +24,8 @@ the minimum as a *base* and the bit width needed for `max - min`, then pack ever
 | What does a valid `.brp` file look like? | `docs/FORMAT.md` — **normative** |
 | How is the code organized, what must never break? | `docs/ARCHITECTURE.md` |
 | Why is it this way? | `docs/adr/` |
-| What comes next? | `docs/ROADMAP.md` |
+| What have we measured? | `docs/EXPERIMENTS.md` |
+| What comes next, and why in that order? | `docs/ROADMAP.md` |
 
 `docs/FORMAT.md` outranks the code. If they disagree, the code is wrong.
 
@@ -59,6 +60,7 @@ cargo test --workspace                   # round-trip, golden, malformed, propte
 cargo clippy --workspace -- -D warnings
 cargo bench -p brp-core                  # encode/decode MB/s
 cargo run -p brp-bench --release -- samples/   # ratio vs PNG/WebP across block sizes
+cargo run -p brp-lab --release -- samples/     # experimental pipelines: size and speed
 cargo run -p brp-cli --release -- info file.brp
 ```
 
@@ -74,3 +76,9 @@ degenerate images regardless of block size.
 
 Not in the format, and not to be added without measurements from `brp-lab`: entropy coding,
 predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode.
+
+**Before claiming anything about compression, read `docs/EXPERIMENTS.md`.** Two results there
+overturn the obvious guesses: PNG's spatial prediction beats this algorithm on photographs by a
+wide margin, and prediction composed naively with range packing produces files *larger than raw*
+until residuals are zigzagged. The synthetic corpus alone gives the opposite answer to the
+photographs, so any measurement run on `gen-samples` output only is not evidence.

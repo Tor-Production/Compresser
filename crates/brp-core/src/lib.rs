@@ -31,7 +31,7 @@ mod image;
 pub use analysis::{analyze, Analysis, BlockInfo};
 pub use bitio::{BitReader, BitWriter};
 pub use block::{BlockGrid, BlockRect};
-pub use channels::{ChannelMode, ChannelOptions, ChannelPlan, CodedIndices};
+pub use channels::{plan as plan_channels, ChannelMode, ChannelOptions, ChannelPlan, CodedIndices};
 pub use decode::{decode, decode_with, DecodeOptions, DEFAULT_MAX_IMAGE_BYTES};
 pub use encode::{encode, EncodeOptions};
 pub use error::BrpError;

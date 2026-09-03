@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/brp-core", "crates/brp-imageio", "crates/brp-cli", "crates/brp-bench"]
+members = ["crates/brp-core", "crates/brp-imageio", "crates/brp-cli", "crates/brp-bench", "crates/brp-lab"]
 resolver = "2"
 
 [workspace.package]
@@ -11,12 +11,14 @@ repository = "https://github.com/yurii-tor/compresser"
 [workspace.dependencies]
 brp-core = { path = "crates/brp-core" }
 brp-imageio = { path = "crates/brp-imageio" }
+brp-lab = { path = "crates/brp-lab" }
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1"
+flate2 = "1"
 
 [profile.release]
 opt-level = 3

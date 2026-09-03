@@ -1,0 +1,17 @@
+[package]
+name = "brp-lab"
+description = "Experimental compression back-ends, for measurement only. Not part of the format."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brp-core = { workspace = true }
+brp-imageio = { workspace = true }
+anyhow = { workspace = true }
+flate2 = { workspace = true }
+
+[[bin]]
+name = "brp-lab"
+path = "src/main.rs"

@@ -3,8 +3,10 @@
 *.pdb
 proptest-regressions/
 
-# The sample corpus is generated and deterministic; regenerate it rather than committing 700 KB
-# of PNGs:  cargo run -p brp-bench --bin gen-samples -- samples/
+# The sample corpus is fetched or generated, never committed: the synthetic images are
+# deterministic, and the photographs are not ours to redistribute.
+#   cargo run -p brp-bench --bin gen-samples -- samples/
+#   pwsh scripts/fetch-photos.ps1
 /samples/*.png
 /samples/*.webp
 /samples/*.brp

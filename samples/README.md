@@ -1,12 +1,27 @@
 # Sample corpus
 
-This directory is where `brp-bench` looks for images. It is empty in a fresh checkout.
+This directory is where `brp-bench` and `brp-lab` look for images. It is empty in a fresh checkout;
+everything except this file is gitignored.
 
-Generate the synthetic corpus:
+## Synthetic images
 
     cargo run -p brp-bench --bin gen-samples -- samples/
 
-Those ten images bracket the algorithm's behaviour — a solid colour is the best case, full-range
-noise the worst — but they are not representative of real photography. Drop your own PNGs or WebPs
-in here alongside them for numbers that mean something. Everything in this directory except this
-file is ignored by git.
+Seventeen generated images that bracket the algorithm's behaviour: solid colours and grayscale
+carried in RGB at one end, full-range noise at the other, with gradients, text pages, screenshots
+and low-contrast content between.
+
+## Real photographs
+
+    pwsh scripts/fetch-photos.ps1
+
+Downloads six images from the Kodak True Color Suite, the corpus lossless-codec papers benchmark
+against. Roughly 4 MB.
+
+## Why both
+
+**The synthetic set alone gives the wrong answer.** Measured on it, BRP's block packing beat
+PNG's approach; add the photographs and the order reverses by a wide margin. The synthetic images
+are full of flat regions and exact structure, which is exactly what range packing is good at.
+
+Never draw a conclusion from the synthetic corpus alone. See `docs/EXPERIMENTS.md`.
