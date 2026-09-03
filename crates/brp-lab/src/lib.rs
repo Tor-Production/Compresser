@@ -12,6 +12,7 @@ use brp_core::RawImage;
 use flate2::{write::DeflateEncoder, Compression};
 use std::io::Write;
 
+pub mod blockpack;
 pub mod filters;
 pub mod huffman;
 pub mod lzw;
@@ -314,14 +315,47 @@ impl Codec for Predicted {
     }
 }
 
+/// An alternative block coder over the format's own residuals. See [`blockpack`].
+pub struct Packed {
+    pub coder: blockpack::BlockCoder,
+    pub block: u32,
+    pub predict: bool,
+    pub entropy: Entropy,
+}
+
+impl Codec for Packed {
+    fn name(&self) -> String {
+        let p = if self.predict { ",pred" } else { "" };
+        format!(
+            "{}[{}x{}{p}]{}",
+            self.coder.name(),
+            self.block,
+            self.block,
+            self.entropy.suffix()
+        )
+    }
+
+    fn encode(&self, img: &RawImage) -> Result<Vec<u8>> {
+        let opts = blockpack::Options {
+            coder: self.coder,
+            block: self.block,
+            predict: self.predict,
+        };
+        self.entropy.pack(&blockpack::encode(img, &opts))
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<RawImage> {
+        blockpack::decode(&self.entropy.unpack(bytes)?)
+    }
+}
+
 /// The pipelines the runner measures, in report order.
 pub fn all_codecs() -> Vec<Box<dyn Codec>> {
-    use predict::{Heuristic, PredictOptions, Scope};
-
+    use blockpack::BlockCoder;
     use brp_core::FilterChoice;
 
     let mut v: Vec<Box<dyn Codec>> = vec![
-        // The format as it stands, with prediction off, on, and chosen per image.
+        // The format as it stands, at both ends of the block-size range.
         Box::new(Brp {
             block: None,
             entropy: Entropy::None,
@@ -330,16 +364,6 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
         Box::new(Brp {
             block: Some(8),
             entropy: Entropy::None,
-            filter: FilterChoice::Off,
-        }),
-        Box::new(Brp {
-            block: Some(8),
-            entropy: Entropy::None,
-            filter: FilterChoice::On,
-        }),
-        Box::new(Brp {
-            block: Some(8),
-            entropy: Entropy::None,
             filter: FilterChoice::Auto,
         }),
         Box::new(Brp {
@@ -347,21 +371,14 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
             entropy: Entropy::Deflate,
             filter: FilterChoice::Auto,
         }),
-        // Adaptive block size.
+        // Adaptive block size, still a candidate.
         Box::new(Quadtree {
             min_leaf: 2,
             entropy: Entropy::None,
         }),
-        Box::new(Quadtree {
-            min_leaf: 2,
-            entropy: Entropy::Deflate,
-        }),
-        // References with no image model, and what PNG actually does.
+        // References: no image model, and what PNG actually does.
         Box::new(Raw {
             entropy: Entropy::Deflate,
-        }),
-        Box::new(Raw {
-            entropy: Entropy::Lzw,
         }),
         Box::new(Filtered {
             entropy: Entropy::Deflate,
@@ -371,30 +388,34 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
         }),
     ];
 
-    // Roadmap item 1: which prediction shape should enter the format?
-    for heuristic in [Heuristic::Sad, Heuristic::MaxAbs] {
-        for scope in [Scope::SharedRow, Scope::PerChannel] {
-            let options = PredictOptions { heuristic, scope };
-            for entropy in [Entropy::None, Entropy::Huffman] {
-                v.push(Box::new(Predicted {
-                    options,
-                    block: Some(8),
-                    entropy,
-                }));
-            }
-        }
-    }
-    // Both shapes with a dictionary stage, so the winner is not decided by the entropy coder.
-    for scope in [Scope::SharedRow, Scope::PerChannel] {
-        v.push(Box::new(Predicted {
-            options: PredictOptions {
-                heuristic: Heuristic::Sad,
-                scope,
-            },
-            block: Some(8),
-            entropy: Entropy::Deflate,
+    // Roadmap item 1: which coder suits the residuals we actually produce?
+    for coder in [
+        BlockCoder::Fixed,
+        BlockCoder::Pfor,
+        BlockCoder::Rice,
+        BlockCoder::Hybrid,
+    ] {
+        v.push(Box::new(Packed {
+            coder,
+            block: 8,
+            predict: true,
+            entropy: Entropy::None,
         }));
     }
+    // The best of them with a dictionary stage, to see how much Deflate still adds.
+    v.push(Box::new(Packed {
+        coder: BlockCoder::Rice,
+        block: 8,
+        predict: true,
+        entropy: Entropy::Deflate,
+    }));
+    // And Rice without prediction, to separate the two contributions.
+    v.push(Box::new(Packed {
+        coder: BlockCoder::Rice,
+        block: 8,
+        predict: false,
+        entropy: Entropy::None,
+    }));
     v
 }
 

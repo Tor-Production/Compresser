@@ -41,7 +41,10 @@ pub use header::{
     WIDTH_CODE_BITS,
 };
 pub use image::{required_len, RawImage, MAX_CHANNELS};
-pub use predict::{unzigzag, zigzag, FILTER_KINDS, FILTER_KIND_BITS};
+pub use predict::{
+    apply as apply_prediction, undo_in_place as undo_prediction, unzigzag, zigzag, FILTER_KINDS,
+    FILTER_KIND_BITS,
+};
 
 /// Result type used throughout the crate.
 pub type Result<T> = core::result::Result<T, BrpError>;

@@ -139,6 +139,75 @@ sacrifices every other block the row passes through.
 PNG's two choices — one predictor per row, chosen by sum of absolute residuals — win on both
 counts, and are what the format adopted.
 
+### 8. What our data actually looks like, and which coder fits it
+
+Prior art names BRP's core exactly: storing a block minimum and packing the offsets at a shared bit
+width is **Frame of Reference** coding, standard in column stores and inverted indexes. The known
+weakness there is the same one BRP has — a single extreme value sets the width for the whole block
+— and the known fix is **Patched Frame of Reference**, which packs at a narrower width and stores
+the outliers separately. So both the algorithm and its documented remedy were worth measuring
+rather than guessing at.
+
+`residual-shape` reports the distribution the format actually produces, at 8x8 blocks after
+prediction, over the photographs:
+
+| Residual (sample minus block minimum) | Share of samples |
+|---|---:|
+| 0 | 13.3% |
+| ≤ 1 | 21.4% |
+| ≤ 3 | 36.5% |
+| ≤ 7 | 56.6% |
+| ≤ 15 | 73.3% |
+| ≤ 63 | 96.0% |
+
+Mean 14.3, and a long thin tail. That is a geometric distribution, which has a matching coder:
+**Golomb-Rice**, with one parameter per block. Measured over exactly those blocks:
+
+| Coder | Bits per sample | Saving |
+|---|---:|---:|
+| Fixed width (shipped) | 5.76 | — |
+| Patched frame of reference | 5.56 | 3.5% |
+| **Golomb-Rice** | **4.81** | **16.5%** |
+
+Rice beating the pooled order-0 entropy (5.16 bits) is not a contradiction: that figure is the
+floor for one *global* model, and Rice re-fits its parameter to every block.
+
+**Half the blocks have their width set by three samples or fewer**, which is precisely the case
+PFOR exists for — yet PFOR recovers only 3.5% while Rice recovers 16.5%. The reason is that PFOR
+still pays a fixed width for the other 61 samples in the block, whereas Rice charges each sample
+for its own magnitude. The outliers were never the main cost; the *rest* of the block was.
+
+End to end, on the photographs:
+
+| Pipeline | Size | Encode | Decode |
+|---|---:|---:|---:|
+| `filter+deflate` (PNG's approach) | **59.2%** | 10 MiB/s | 105 MiB/s |
+| `rice[8x8,pred]+deflate` | 61.9% | 18 MiB/s | 48 MiB/s |
+| **`rice[8x8,pred]`** | **62.5%** | 27 MiB/s | 56 MiB/s |
+| `hybrid[8x8,pred]` (per-block fixed-or-Rice) | 62.7% | 26 MiB/s | 55 MiB/s |
+| `filter+huffman` | 63.2% | 71 MiB/s | 59 MiB/s |
+| `pfor[8x8,pred]` | 71.1% | 36 MiB/s | 102 MiB/s |
+| `fixed[8x8,pred]` (the format today) | 74.4% | 44 MiB/s | 107 MiB/s |
+| `rice[8x8]` — no prediction | 76.8% | 59 MiB/s | 89 MiB/s |
+
+Four things follow.
+
+- **Rice is worth 12 points on its own**, swapping only the block coder: 74.4% to 62.5%. It closes
+  the gap to PNG from 15 points to 3.3.
+- **Rice needs prediction.** Without it the same coder saves 1 point, not 12 — the residuals are
+  not geometric until prediction makes them so. The two stages compound; unlike prediction and
+  fixed-width packing, which fought.
+- **Deflate becomes nearly pointless on top of Rice** — 62.5% to 61.9%. Rice has already taken what
+  a dictionary would have found, which means the format can have the ratio without carrying an
+  LZ77 implementation.
+- **Hybrid loses to plain Rice.** The per-block flag costs more than the rare blocks where fixed
+  width wins. Adaptivity is not free, and here it does not pay.
+
+Rice is also **table-free**: no 256-entry code table in the header, no table construction on
+encode, no table walk on decode. That matters because the format's remaining advantage over PNG is
+speed. The current implementation writes the unary prefix one bit at a time and is slower than
+fixed-width packing; that is an implementation cost, not an inherent one.
+
 ## Adopted into the format
 
 Prediction landed in format version 3 (ADR 0006). On the photographs, at 8x8 blocks:
@@ -151,10 +220,12 @@ Prediction landed in format version 3 (ADR 0006). On the photographs, at 8x8 blo
 ## What this says to do next
 
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
-2. **Entropy-code the residuals.** Huffman gets most of the way; Deflate's dictionary adds less
-   once prediction has removed the spatial redundancy. Bringing an entropy stage inside the format
-   would close most of the remaining gap to `filter+deflate`.
-3. **Adaptive block size last.** Real, but the smallest of the three, and it partly cancels against
-   entropy coding.
+2. **Replace fixed-width block packing with Golomb-Rice.** Measured at 12 points on photographs,
+   table-free, and it makes an LZ77 stage unnecessary. This is the next format version.
+3. **Adaptive block size.** Still real, still the smallest of the three, and it now has to be
+   re-measured on top of Rice rather than on top of fixed width.
+
+Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), and
+a per-block choice between fixed and Rice (the flag costs more than it saves).
 
 Each step needs a format version bump and an ADR, and should be re-measured on both corpora.

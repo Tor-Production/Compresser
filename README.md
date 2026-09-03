@@ -68,7 +68,11 @@ Four findings worth stating plainly:
   and optimising the largest residual rather than their sum — which looks right, since the width
   code is set by the extreme — loses 1.8 points. PNG's choices survived contact with the data.
 
-Next is entropy coding of the residuals. See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Next, and already measured:** replacing fixed-width block packing with Golomb-Rice takes
+photographs from 74.4% to **62.5%** — 12 points from swapping one coder, table-free, and it makes
+an LZ77 stage unnecessary. Our residuals turn out to be geometric once prediction has run (57% of
+them fit in three bits), and Rice is the coder that distribution asks for. See
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Build and use
 
@@ -129,7 +133,7 @@ prints a table has also proved the round-trip on real image data.
 | `crates/brp-imageio` | PNG and WebP bridge, shared by the CLI and the benchmark. |
 | `crates/brp-cli` | `encode` / `decode` / `info`. |
 | `crates/brp-bench` | Compression-ratio table against PNG and WebP, plus the sample generator. |
-| `crates/brp-lab` | Experimental pipelines: quadtree, Huffman, LZW, Deflate, PNG-style filters. Not part of the format. |
+| `crates/brp-lab` | Experimental pipelines: quadtree, Rice, patched frame-of-reference, Huffman, LZW, Deflate, PNG-style filters. Not part of the format. |
 | `docs/FORMAT.md` | Normative bitstream specification. Outranks the code. |
 | `docs/ARCHITECTURE.md` | Module map, data flow, invariants. |
 | `docs/EXPERIMENTS.md` | Measured results, and what they say to build next. |

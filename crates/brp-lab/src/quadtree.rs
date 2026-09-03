@@ -414,10 +414,15 @@ mod tests {
         let adaptive = encode(&img, 2).len();
 
         // A fixed grid fine enough for the busy half must also pay for the flat half.
+        //
+        // Prediction is switched off on the baseline deliberately: this quadtree does not predict,
+        // so leaving the format's default on would compare adaptive block size against prediction
+        // rather than against a fixed grid.
         let fixed = brp_core::encode(
             &img,
             &brp_core::EncodeOptions {
                 block_size: Some((4, 4)),
+                filter: brp_core::FilterChoice::Off,
                 ..Default::default()
             },
         )
