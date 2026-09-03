@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+# Criterion owns benchmarking; keep the default libtest harness out of `cargo bench`.
+bench = false
+
 [dependencies]
 thiserror = { workspace = true }
 

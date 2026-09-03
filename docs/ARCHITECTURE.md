@@ -5,8 +5,9 @@
 | Crate | Role | Notable constraint |
 |---|---|---|
 | `brp-core` | The codec: bit I/O, header, block geometry, encode, decode. | No image-format dependencies. `#![forbid(unsafe_code)]`. Must stay `wasm32`-clean and C-ABI-wrappable. |
-| `brp-cli` | `encode` / `decode` / `info` commands. | Owns all PNG/WebP I/O via the `image` crate. |
-| `brp-bench` | Compression-ratio table against PNG and WebP across block sizes. | Verifies losslessness on real images as a side effect. |
+| `brp-imageio` | PNG and WebP bridge: `DynamicImage` to and from `RawImage`. | The only crate that depends on `image`. Exists so the CLI and the benchmark share the conversion without one depending on the other. |
+| `brp-cli` | `encode` / `decode` / `info` commands. | All file I/O goes through `brp-imageio`. |
+| `brp-bench` | Compression-ratio table against PNG and WebP across block sizes, plus the `gen-samples` corpus generator. | Verifies losslessness on real images as a side effect. |
 
 `brp-core` deliberately does not depend on `image`. Pulling a PNG decoder into the codec would
 block the WASM and embedded targets on the roadmap, and would make the core's dependency surface

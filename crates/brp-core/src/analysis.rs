@@ -69,16 +69,17 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
             coded: coded as u8,
         };
 
-        for c in 0..coded {
+        for (c, channel_hist) in histogram.iter_mut().enumerate().take(coded) {
             info.bases[c] = reader.read(u32::from(header.bit_depth))? as u8;
             let width_code = reader.read(WIDTH_CODE_BITS)? as u8;
             if width_code > header.bit_depth {
                 return Err(BrpError::InvalidWidthCode(width_code));
             }
             info.width_codes[c] = width_code;
-            histogram[c][usize::from(width_code)] += 1;
+            channel_hist[usize::from(width_code)] += 1;
         }
-        block_header_bits += coded as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
+        block_header_bits +=
+            coded as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
 
         let pixels = rect.pixel_count();
         for c in 0..coded {

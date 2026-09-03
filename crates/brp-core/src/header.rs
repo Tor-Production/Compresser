@@ -126,10 +126,12 @@ impl Header {
 
         let mut consumed = HEADER_BASE_SIZE;
         let alpha_const = if alpha_constant {
-            let a = *bytes.get(HEADER_BASE_SIZE).ok_or(BrpError::HeaderTooShort {
-                got: bytes.len(),
-                need: HEADER_BASE_SIZE + 1,
-            })?;
+            let a = *bytes
+                .get(HEADER_BASE_SIZE)
+                .ok_or(BrpError::HeaderTooShort {
+                    got: bytes.len(),
+                    need: HEADER_BASE_SIZE + 1,
+                })?;
             consumed += 1;
             Some(a)
         } else {
@@ -254,7 +256,12 @@ mod tests {
 
     #[test]
     fn rejects_zero_dimensions() {
-        for (offset, what) in [(6, "width"), (10, "height"), (16, "block_w"), (20, "block_h")] {
+        for (offset, what) in [
+            (6, "width"),
+            (10, "height"),
+            (16, "block_w"),
+            (20, "block_h"),
+        ] {
             let mut bytes = encoded(&sample());
             bytes[offset..offset + 4].copy_from_slice(&0u32.to_le_bytes());
             assert_eq!(

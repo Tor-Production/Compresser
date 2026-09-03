@@ -112,6 +112,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brp-core",
+ "brp-imageio",
  "image",
 ]
 
@@ -121,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brp-core",
+ "brp-imageio",
  "clap",
  "image",
 ]
@@ -132,6 +134,15 @@ dependencies = [
  "criterion",
  "proptest",
  "thiserror",
+]
+
+[[package]]
+name = "brp-imageio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brp-core",
+ "image",
 ]
 
 [[package]]

@@ -104,11 +104,35 @@ mod tests {
         assert_eq!(blocks.len(), 6);
 
         // Right edge: 10 = 4 + 4 + 2.
-        assert_eq!(blocks[2], BlockRect { x: 8, y: 0, w: 2, h: 4 });
+        assert_eq!(
+            blocks[2],
+            BlockRect {
+                x: 8,
+                y: 0,
+                w: 2,
+                h: 4
+            }
+        );
         // Bottom edge: 6 = 4 + 2.
-        assert_eq!(blocks[3], BlockRect { x: 0, y: 4, w: 4, h: 2 });
+        assert_eq!(
+            blocks[3],
+            BlockRect {
+                x: 0,
+                y: 4,
+                w: 4,
+                h: 2
+            }
+        );
         // The corner is clipped in both directions.
-        assert_eq!(blocks[5], BlockRect { x: 8, y: 4, w: 2, h: 2 });
+        assert_eq!(
+            blocks[5],
+            BlockRect {
+                x: 8,
+                y: 4,
+                w: 2,
+                h: 2
+            }
+        );
 
         // Clipped blocks tile the image exactly, with no overlap and no gap.
         let covered: u64 = blocks.iter().map(BlockRect::pixel_count).sum();
@@ -126,7 +150,15 @@ mod tests {
     fn block_larger_than_image() {
         let g = BlockGrid::new(3, 2, 64, 64);
         let blocks: Vec<_> = g.iter().collect();
-        assert_eq!(blocks, vec![BlockRect { x: 0, y: 0, w: 3, h: 2 }]);
+        assert_eq!(
+            blocks,
+            vec![BlockRect {
+                x: 0,
+                y: 0,
+                w: 3,
+                h: 2
+            }]
+        );
     }
 
     #[test]
@@ -138,7 +170,12 @@ mod tests {
 
     #[test]
     fn tiling_is_exact_for_awkward_sizes() {
-        for (w, h, bw, bh) in [(1, 1, 1, 1), (7, 13, 4, 4), (17, 5, 8, 2), (100, 100, 33, 7)] {
+        for (w, h, bw, bh) in [
+            (1, 1, 1, 1),
+            (7, 13, 4, 4),
+            (17, 5, 8, 2),
+            (100, 100, 33, 7),
+        ] {
             let g = BlockGrid::new(w, h, bw, bh);
             let covered: u64 = g.iter().map(|r| r.pixel_count()).sum();
             assert_eq!(covered, u64::from(w) * u64::from(h), "{w}x{h} by {bw}x{bh}");

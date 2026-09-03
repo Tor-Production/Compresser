@@ -190,6 +190,8 @@ mod tests {
         assert_eq!(r.bit_pos(), 0, "zero-width read must not advance");
     }
 
+    // The uneven digit grouping is the point: it mirrors the 1-, 3- and 4-bit fields written.
+    #[allow(clippy::unusual_byte_groupings)]
     #[test]
     fn writes_msb_first() {
         let mut w = BitWriter::new();

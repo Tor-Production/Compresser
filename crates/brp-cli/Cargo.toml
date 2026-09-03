@@ -5,8 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+# The installed command is `brp`, matching the docs and the clap command name.
+name = "brp"
+path = "src/main.rs"
+
 [dependencies]
 brp-core = { workspace = true }
+brp-imageio = { workspace = true }
 image = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

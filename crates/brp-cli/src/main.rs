@@ -1,1 +1,326 @@
-fn main() {}
+//! `brp` — encode, decode and inspect BRP files.
+
+use anyhow::{bail, Context, Result};
+use brp_core::{
+    analyze, decode_with, encode, Analysis, DecodeOptions, EncodeOptions, MAX_CHANNELS,
+};
+use clap::{Args, Parser, Subcommand};
+use std::path::{Path, PathBuf};
+
+#[derive(Parser)]
+#[command(
+    name = "brp",
+    version,
+    about = "Block Range Packing: a lossless image codec"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Compress an image into a .brp file.
+    Encode(EncodeArgs),
+    /// Decompress a .brp file into a PNG.
+    Decode(DecodeArgs),
+    /// Print the structure of a .brp file.
+    Info(InfoArgs),
+}
+
+#[derive(Args)]
+struct EncodeArgs {
+    /// Source image (PNG or WebP).
+    input: PathBuf,
+    /// Destination .brp file.
+    output: PathBuf,
+    /// Block size as WxH, or a single number for a square. Defaults to the whole image.
+    #[arg(long, value_name = "WxH", value_parser = parse_block_size)]
+    block_size: Option<(u32, u32)>,
+    /// Keep the alpha channel in every block even when it is constant.
+    #[arg(long)]
+    no_alpha_opt: bool,
+}
+
+#[derive(Args)]
+struct DecodeArgs {
+    /// Source .brp file.
+    input: PathBuf,
+    /// Destination PNG.
+    output: PathBuf,
+    /// Refuse to decode an image larger than this many bytes of samples.
+    #[arg(long, default_value_t = brp_core::DEFAULT_MAX_IMAGE_BYTES)]
+    max_image_bytes: usize,
+}
+
+#[derive(Args)]
+struct InfoArgs {
+    /// The .brp file to inspect.
+    input: PathBuf,
+    /// How many blocks to list individually.
+    #[arg(long, default_value_t = 8)]
+    blocks: usize,
+}
+
+/// Accepts `16x16` or `16`.
+fn parse_block_size(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = match s.split_once(['x', 'X']) {
+        Some((w, h)) => (w, h),
+        None => (s, s),
+    };
+    let parse = |v: &str, name: &str| {
+        v.trim()
+            .parse::<u32>()
+            .map_err(|_| format!("{name} is not a number: {v:?}"))
+            .and_then(|n| {
+                if n == 0 {
+                    Err(format!("{name} must be greater than zero"))
+                } else {
+                    Ok(n)
+                }
+            })
+    };
+    Ok((parse(w, "block width")?, parse(h, "block height")?))
+}
+
+fn main() -> Result<()> {
+    match Cli::parse().command {
+        Command::Encode(a) => cmd_encode(&a),
+        Command::Decode(a) => cmd_decode(&a),
+        Command::Info(a) => cmd_info(&a),
+    }
+}
+
+fn cmd_encode(args: &EncodeArgs) -> Result<()> {
+    let loaded = brp_imageio::load(&args.input)?;
+    if loaded.narrowed {
+        eprintln!(
+            "warning: {} has more than 8 bits per sample; it was reduced to 8, so this is lossy",
+            args.input.display()
+        );
+    }
+
+    let opts = EncodeOptions {
+        block_size: args.block_size,
+        alpha_opt: !args.no_alpha_opt,
+    };
+    let bytes = encode(&loaded.image, &opts).map_err(|e| anyhow::anyhow!(e))?;
+    std::fs::write(&args.output, &bytes)
+        .with_context(|| format!("writing {}", args.output.display()))?;
+
+    let raw = loaded.image.data().len();
+    println!(
+        "{} -> {}\n  {}x{}, {} channels\n  raw {}, brp {} ({:.1}% of raw)",
+        args.input.display(),
+        args.output.display(),
+        loaded.image.width(),
+        loaded.image.height(),
+        loaded.image.channels(),
+        human(raw),
+        human(bytes.len()),
+        100.0 * bytes.len() as f64 / raw as f64,
+    );
+    Ok(())
+}
+
+fn cmd_decode(args: &DecodeArgs) -> Result<()> {
+    let bytes = read_file(&args.input)?;
+    let opts = DecodeOptions {
+        max_image_bytes: args.max_image_bytes,
+    };
+    let img = decode_with(&bytes, &opts).map_err(|e| anyhow::anyhow!(e))?;
+    brp_imageio::save_png(&img, &args.output)?;
+    println!(
+        "{} -> {}\n  {}x{}, {} channels, {}",
+        args.input.display(),
+        args.output.display(),
+        img.width(),
+        img.height(),
+        img.channels(),
+        human(img.data().len()),
+    );
+    Ok(())
+}
+
+fn cmd_info(args: &InfoArgs) -> Result<()> {
+    let bytes = read_file(&args.input)?;
+    let a = analyze(&bytes).map_err(|e| anyhow::anyhow!(e))?;
+    print_info(&a, args.blocks);
+    Ok(())
+}
+
+fn print_info(a: &Analysis, list_blocks: usize) {
+    let h = &a.header;
+    let blocks = a.blocks.len();
+
+    println!("header");
+    println!("  version        1");
+    println!("  dimensions     {}x{}", h.width, h.height);
+    println!(
+        "  channels       {} ({})",
+        h.channels,
+        channel_names(h.channels)
+    );
+    println!("  bit depth      {}", h.bit_depth);
+    println!("  block size     {}x{}", h.block_w, h.block_h);
+    match h.alpha_const {
+        Some(v) => println!("  alpha          constant {v}, channel elided"),
+        None if h.has_alpha() => println!("  alpha          coded per block"),
+        None => println!("  alpha          none"),
+    }
+
+    let total_bits = a.file_bytes as u64 * 8;
+    let header_bits = a.header_bytes as u64 * 8;
+    println!("\nsize");
+    println!("  raw pixels     {:>12}", human(a.raw_bytes));
+    println!(
+        "  brp file       {:>12}   {:.1}% of raw",
+        human(a.file_bytes),
+        100.0 * a.ratio()
+    );
+    println!("  blocks         {blocks:>12}");
+    println!("\nwhere the bits went");
+    print_bits("file header", header_bits, total_bits);
+    print_bits("block headers", a.block_header_bits, total_bits);
+    print_bits("payload", a.payload_bits, total_bits);
+    print_bits("padding", a.padding_bits, total_bits);
+    if a.trailing_bytes > 0 {
+        println!("  {} trailing bytes ignored", a.trailing_bytes);
+    }
+
+    println!("\nwidth codes chosen (bits per sample)");
+    let coded = h.coded_channels();
+    print!("  {:<10}", "channel");
+    for code in 0..=8 {
+        print!("{code:>7}");
+    }
+    println!();
+    for c in 0..coded.min(MAX_CHANNELS) {
+        print!("  {:<10}", channel_label(h.channels, c));
+        for code in 0..=8usize {
+            let n = a.width_code_histogram[c][code];
+            if n == 0 {
+                print!("{:>7}", ".");
+            } else {
+                print!("{n:>7}");
+            }
+        }
+        println!();
+    }
+
+    if list_blocks > 0 && blocks > 0 {
+        let shown = list_blocks.min(blocks);
+        println!("\nfirst {shown} of {blocks} block(s)");
+        println!(
+            "  {:>6} {:>6} {:>6} {:>6}   {:<24} {:<20}",
+            "x", "y", "w", "h", "base", "bits/sample"
+        );
+        for b in a.blocks.iter().take(shown) {
+            let n = usize::from(b.coded);
+            let bases: Vec<String> = b.bases[..n].iter().map(u8::to_string).collect();
+            let widths: Vec<String> = b.width_codes[..n].iter().map(u8::to_string).collect();
+            println!(
+                "  {:>6} {:>6} {:>6} {:>6}   {:<24} {:<20}",
+                b.rect.x,
+                b.rect.y,
+                b.rect.w,
+                b.rect.h,
+                bases.join(", "),
+                widths.join(", "),
+            );
+        }
+    }
+}
+
+fn print_bits(label: &str, bits: u64, total: u64) {
+    let share = if total == 0 {
+        0.0
+    } else {
+        100.0 * bits as f64 / total as f64
+    };
+    println!("  {label:<14} {:>12}   {share:>5.1}%", human_bits(bits));
+}
+
+fn channel_names(channels: u8) -> &'static str {
+    match channels {
+        1 => "gray",
+        2 => "gray + alpha",
+        3 => "RGB",
+        4 => "RGBA",
+        _ => "?",
+    }
+}
+
+fn channel_label(channels: u8, index: usize) -> &'static str {
+    match (channels, index) {
+        (1 | 2, 0) => "gray",
+        (1 | 2, 1) => "alpha",
+        (3 | 4, 0) => "red",
+        (3 | 4, 1) => "green",
+        (3 | 4, 2) => "blue",
+        (3 | 4, 3) => "alpha",
+        _ => "?",
+    }
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    if !path.exists() {
+        bail!("{} does not exist", path.display());
+    }
+    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+fn human(bytes: usize) -> String {
+    human_u64(bytes as u64)
+}
+
+fn human_bits(bits: u64) -> String {
+    if bits.is_multiple_of(8) {
+        human_u64(bits / 8)
+    } else {
+        format!("{bits} bits")
+    }
+}
+
+fn human_u64(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_size_accepts_square_and_rectangle() {
+        assert_eq!(parse_block_size("16"), Ok((16, 16)));
+        assert_eq!(parse_block_size("8x32"), Ok((8, 32)));
+        assert_eq!(parse_block_size("8X32"), Ok((8, 32)));
+    }
+
+    #[test]
+    fn block_size_rejects_nonsense() {
+        assert!(parse_block_size("0").is_err());
+        assert!(parse_block_size("16x0").is_err());
+        assert!(parse_block_size("abc").is_err());
+        assert!(parse_block_size("16x").is_err());
+        assert!(parse_block_size("-4").is_err());
+    }
+
+    #[test]
+    fn human_sizes_read_naturally() {
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(2048), "2.0 KiB");
+        assert_eq!(human(3 * 1024 * 1024), "3.0 MiB");
+    }
+}

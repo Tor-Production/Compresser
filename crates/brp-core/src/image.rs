@@ -90,7 +90,14 @@ mod tests {
     #[test]
     fn rejects_mismatched_buffer_length() {
         let err = RawImage::new(2, 2, 3, vec![0; 11]).unwrap_err();
-        assert!(matches!(err, BrpError::BufferLengthMismatch { need: 12, got: 11, .. }));
+        assert!(matches!(
+            err,
+            BrpError::BufferLengthMismatch {
+                need: 12,
+                got: 11,
+                ..
+            }
+        ));
     }
 
     #[test]

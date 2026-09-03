@@ -49,7 +49,13 @@ fn scan_plane(data: &[u8], channel: usize, stride: usize) -> (u8, u8) {
 ///
 /// The hot reduction; kept separate so it can be vectorized on its own later.
 #[inline]
-fn scan_block(data: &[u8], img_w: u32, stride: usize, rect: &BlockRect, channel: usize) -> (u8, u8) {
+fn scan_block(
+    data: &[u8],
+    img_w: u32,
+    stride: usize,
+    rect: &BlockRect,
+    channel: usize,
+) -> (u8, u8) {
     let mut min = u8::MAX;
     let mut max = u8::MIN;
     for row in 0..rect.h {
@@ -170,13 +176,28 @@ mod tests {
     fn scan_block_respects_the_rectangle() {
         // 3x2 grayscale: [1 2 3 / 4 5 6]
         let data = vec![1, 2, 3, 4, 5, 6];
-        let all = BlockRect { x: 0, y: 0, w: 3, h: 2 };
+        let all = BlockRect {
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 2,
+        };
         assert_eq!(scan_block(&data, 3, 1, &all, 0), (1, 6));
 
-        let left = BlockRect { x: 0, y: 0, w: 2, h: 2 };
+        let left = BlockRect {
+            x: 0,
+            y: 0,
+            w: 2,
+            h: 2,
+        };
         assert_eq!(scan_block(&data, 3, 1, &left, 0), (1, 5));
 
-        let top_right = BlockRect { x: 2, y: 0, w: 1, h: 1 };
+        let top_right = BlockRect {
+            x: 2,
+            y: 0,
+            w: 1,
+            h: 1,
+        };
         assert_eq!(scan_block(&data, 3, 1, &top_right, 0), (3, 3));
     }
 

@@ -28,8 +28,9 @@ is dropped from the file entirely and replaced by one header flag plus its value
    `crates/brp-core/tests/golden.rs` will fail; do not "fix" them by regenerating the expected
    bytes unless you are deliberately versioning the format.
 2. **Encode and decode change together**, in the same commit.
-3. **`brp-core` must not gain an image-format dependency.** PNG/WebP belong to `brp-cli` and
-   `brp-bench` only.
+3. **`brp-core` must not gain an image-format dependency.** The `image` crate belongs to
+   `brp-imageio` alone; `brp-cli` and `brp-bench` go through that. Keeping PNG and WebP out of the
+   core is what keeps the `wasm32` and C-ABI targets on the roadmap reachable.
 4. **No `unsafe` in `brp-core`.**
 5. **The decoder parses untrusted input.** Every value read from a file is hostile until validated
    against `FORMAT.md` §7. No unchecked indexing, no unchecked arithmetic on header fields,

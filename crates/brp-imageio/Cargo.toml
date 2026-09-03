@@ -1,5 +1,6 @@
 [package]
-name = "brp-bench"
+name = "brp-imageio"
+description = "PNG and WebP bridge between the image crate and brp-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,6 +8,5 @@ repository.workspace = true
 
 [dependencies]
 brp-core = { workspace = true }
-brp-imageio = { workspace = true }
 image = { workspace = true }
 anyhow = { workspace = true }

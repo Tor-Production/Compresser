@@ -98,7 +98,7 @@ fn every_interesting_span() {
     for span in [0u8, 1, 2, 15, 16, 127, 128, 254, 255] {
         for ch in 1..=4u8 {
             let src = image(8, 8, ch, |x, y, _| {
-                let i = (y * 8 + x) as u32;
+                let i = y * 8 + x;
                 if span == 0 {
                     100
                 } else {
@@ -122,13 +122,18 @@ fn high_bases_do_not_overflow() {
 fn constant_alpha_variants() {
     for alpha in [0u8, 1, 128, 254, 255] {
         for ch in [2u8, 4] {
-            let src = image(9, 7, ch, |x, y, c| {
-                if c == ch - 1 {
-                    alpha
-                } else {
-                    noise(x, y, c)
-                }
-            });
+            let src = image(
+                9,
+                7,
+                ch,
+                |x, y, c| {
+                    if c == ch - 1 {
+                        alpha
+                    } else {
+                        noise(x, y, c)
+                    }
+                },
+            );
             assert_round_trips(&src);
 
             // With the optimization on, the flag must actually fire and shrink the file.
@@ -162,7 +167,12 @@ fn constant_alpha_variants() {
 
 #[test]
 fn varying_alpha_is_not_elided() {
-    let src = image(8, 8, 4, |x, y, c| if c == 3 { x as u8 } else { noise(x, y, c) });
+    let src = image(
+        8,
+        8,
+        4,
+        |x, y, c| if c == 3 { x as u8 } else { noise(x, y, c) },
+    );
     assert_round_trips(&src);
     let bytes = encode(&src, &EncodeOptions::default()).unwrap();
     assert_eq!(analyze(&bytes).unwrap().header.alpha_const, None);

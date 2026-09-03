@@ -1,6 +1,11 @@
 /target
 **/*.rs.bk
 *.pdb
+proptest-regressions/
+
+# The sample corpus is generated and deterministic; regenerate it rather than committing 700 KB
+# of PNGs:  cargo run -p brp-bench --bin gen-samples -- samples/
+/samples/*.png
+/samples/*.webp
 /samples/*.brp
 /samples/out/
-proptest-regressions/
