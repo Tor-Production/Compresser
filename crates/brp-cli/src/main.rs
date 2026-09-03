@@ -2,8 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use brp_core::{
-    analyze, decode_with, encode, Analysis, ChannelMode, ChannelOptions, DecodeOptions,
-    EncodeOptions, FilterChoice,
+    analyze, decode_with, encode, Analysis, ChannelMode, ChannelOptions, CoderChoice,
+    DecodeOptions, EncodeOptions, FilterChoice,
 };
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -47,6 +47,29 @@ struct EncodeArgs {
     /// How to use spatial prediction: off, on, or try both and keep the smaller file.
     #[arg(long, value_enum, default_value_t = FilterArg::Auto)]
     filter: FilterArg,
+    /// How to pack each block: fixed width, Golomb-Rice, or whichever costs less.
+    #[arg(long, value_enum, default_value_t = CoderArg::Auto)]
+    coder: CoderArg,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum CoderArg {
+    /// Every residual at the block's own width. Fastest, and best on uniform data.
+    Fixed,
+    /// Golomb-Rice with a per-block parameter. Smaller on predicted residuals.
+    Rice,
+    /// Cost both and take the cheaper.
+    Auto,
+}
+
+impl From<CoderArg> for CoderChoice {
+    fn from(a: CoderArg) -> Self {
+        match a {
+            CoderArg::Fixed => CoderChoice::Fixed,
+            CoderArg::Rice => CoderChoice::Rice,
+            CoderArg::Auto => CoderChoice::Auto,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -134,6 +157,7 @@ fn cmd_encode(args: &EncodeArgs) -> Result<()> {
             aliases: !args.no_channel_aliasing,
         },
         filter: args.filter.into(),
+        coder: args.coder.into(),
     };
     let bytes = encode(&loaded.image, &opts).map_err(|e| anyhow::anyhow!(e))?;
     std::fs::write(&args.output, &bytes)
@@ -184,6 +208,7 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     let h = &a.header;
     let blocks = a.blocks.len();
     let coded = h.coded_indices();
+    let rice = h.block_coder == brp_core::BLOCK_CODER_RICE;
 
     println!("header");
     println!("  version        {}", brp_core::VERSION);
@@ -202,6 +227,10 @@ fn print_info(a: &Analysis, list_blocks: usize) {
         } else {
             "off"
         }
+    );
+    println!(
+        "  block coder    {}",
+        if rice { "golomb-rice" } else { "fixed width" }
     );
 
     println!("\nchannel plan (stage 1)");
@@ -261,16 +290,22 @@ fn print_info(a: &Analysis, list_blocks: usize) {
         }
     }
 
-    println!("\nwidth codes chosen (bits per sample)");
+    // Under Rice the field is a mode: 0 means an all-zero block, and mode m means k = m - 1.
+    let (label, top) = if rice {
+        ("rice modes chosen (0 = empty block, m = k+1)", 9usize)
+    } else {
+        ("width codes chosen (bits per sample)", 8)
+    };
+    println!("\n{label}");
     print!("  {:<10}", "channel");
-    for code in 0..=8 {
+    for code in 0..=top {
         print!("{code:>7}");
     }
     println!();
     for slot in 0..coded.len() {
         let c = coded.channel(slot);
         print!("  {:<10}", channel_label(h.channels, c));
-        for code in 0..=8usize {
+        for code in 0..=top {
             let n = a.width_code_histogram[c][code];
             if n == 0 {
                 print!("{:>7}", ".");
@@ -286,7 +321,12 @@ fn print_info(a: &Analysis, list_blocks: usize) {
         println!("\nfirst {shown} of {blocks} block(s), coded channels only");
         println!(
             "  {:>6} {:>6} {:>6} {:>6}   {:<24} {:<20}",
-            "x", "y", "w", "h", "base", "bits/sample"
+            "x",
+            "y",
+            "w",
+            "h",
+            "base",
+            if rice { "rice mode" } else { "bits/sample" }
         );
         for b in a.blocks.iter().take(shown) {
             let n = usize::from(b.coded);

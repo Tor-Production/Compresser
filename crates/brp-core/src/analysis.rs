@@ -3,9 +3,10 @@
 use crate::bitio::BitReader;
 use crate::block::{BlockGrid, BlockRect};
 use crate::error::BrpError;
-use crate::header::{Header, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
+use crate::header::{Header, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
 use crate::image::{required_len, MAX_CHANNELS};
 use crate::predict::{FILTER_KINDS, FILTER_KIND_BITS};
+use crate::rice;
 use crate::Result;
 
 /// One block's coded parameters. Entries are indexed by *slot*, matching
@@ -37,8 +38,9 @@ pub struct Analysis {
     pub padding_bits: u64,
     /// Bytes past the end of the bitstream, if any.
     pub trailing_bytes: usize,
-    /// `histogram[image channel][width_code]` — how often each width was chosen.
-    pub width_code_histogram: [[u64; 9]; MAX_CHANNELS],
+    /// `histogram[image channel][parameter]` — how often each per-block parameter was chosen.
+    /// A width code under the fixed coder, a Rice mode under Rice, so the index range differs.
+    pub width_code_histogram: [[u64; 10]; MAX_CHANNELS],
     pub blocks: Vec<BlockInfo>,
     /// Raw size of the image these bits reconstruct.
     pub raw_bytes: usize,
@@ -60,7 +62,7 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
     let raw_bytes = required_len(header.width, header.height, header.channels)?;
 
     let mut blocks = Vec::new();
-    let mut histogram = [[0u64; 9]; MAX_CHANNELS];
+    let mut histogram = [[0u64; 10]; MAX_CHANNELS];
     let mut block_header_bits = 0u64;
     let mut payload_bits = 0u64;
     let mut body_bits_used = 0u64;
@@ -93,23 +95,39 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
                 coded: coded.len() as u8,
             };
 
+            let rice_coded = header.block_coder == BLOCK_CODER_RICE;
             for slot in 0..coded.len() {
                 info.bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
-                let width_code = reader.read(WIDTH_CODE_BITS)? as u8;
-                if width_code > header.bit_depth {
-                    return Err(BrpError::InvalidWidthCode(width_code));
+                let param = reader.read(WIDTH_CODE_BITS)?;
+                if rice_coded {
+                    rice::parameter_for(param)?;
+                } else if param > u32::from(header.bit_depth) {
+                    return Err(BrpError::InvalidWidthCode(param as u8));
                 }
-                info.width_codes[slot] = width_code;
-                histogram[coded.channel(slot)][usize::from(width_code)] += 1;
+                info.width_codes[slot] = param as u8;
+                histogram[coded.channel(slot)][param as usize] += 1;
             }
             block_header_bits +=
                 coded.len() as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
 
             let pixels = rect.pixel_count();
             for slot in 0..coded.len() {
-                let bits = pixels * u64::from(info.width_codes[slot]);
-                reader.skip(bits)?;
-                payload_bits += bits;
+                let param = u32::from(info.width_codes[slot]);
+                if rice_coded {
+                    // Rice codes are variable-length, so their size cannot be computed from the
+                    // parameter; the only way to measure the payload is to walk it.
+                    if let Some(k) = rice::parameter_for(param)? {
+                        let before = reader.bit_pos();
+                        for _ in 0..pixels {
+                            rice::read(&mut reader, k)?;
+                        }
+                        payload_bits += (reader.bit_pos() - before) as u64;
+                    }
+                } else {
+                    let bits = pixels * u64::from(param);
+                    reader.skip(bits)?;
+                    payload_bits += bits;
+                }
             }
 
             blocks.push(info);
@@ -153,6 +171,7 @@ mod tests {
     fn plain() -> EncodeOptions {
         EncodeOptions {
             filter: FilterChoice::Off,
+            coder: crate::encode::CoderChoice::Fixed,
             ..Default::default()
         }
     }
@@ -164,7 +183,7 @@ mod tests {
         let a = analyze(&bytes).unwrap();
 
         assert_eq!(a.file_bytes, bytes.len());
-        assert_eq!(a.header_bytes, 26);
+        assert_eq!(a.header_bytes, 27);
         assert_eq!(a.raw_bytes, 192);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.trailing_bytes, 0);
@@ -190,6 +209,7 @@ mod tests {
             &EncodeOptions {
                 block_size: Some((4, 4)),
                 filter: FilterChoice::On,
+                coder: crate::encode::CoderChoice::Fixed,
                 ..Default::default()
             },
         )
@@ -214,7 +234,7 @@ mod tests {
         assert_eq!(a.payload_bits, 0);
         assert_eq!(a.filter_bits, 0, "nothing to predict");
         assert_eq!(a.header.plan.mode(0), ChannelMode::Constant(77));
-        assert_eq!(a.file_bytes, 27);
+        assert_eq!(a.file_bytes, 28);
     }
 
     #[test]
@@ -238,6 +258,7 @@ mod tests {
         let opts = EncodeOptions {
             block_size: Some((4, 4)),
             filter: FilterChoice::Off,
+            coder: crate::encode::CoderChoice::Fixed,
             ..Default::default()
         };
         let bytes = encode(&src, &opts).unwrap();

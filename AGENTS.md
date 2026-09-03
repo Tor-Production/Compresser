@@ -17,9 +17,11 @@ earlier channel (identical samples, so a grayscale image stored as RGB costs one
 PNG's five predictors and every sample becomes the **zigzagged** difference from its prediction.
 The zigzag is not cosmetic — without it this stage makes files *larger than raw*.
 
-**Stage 2, block range packing.** Split the image into blocks; per block, per coded channel, store
-the minimum as a *base* and the bit width needed for `max - min`, then pack every sample as
-`sample - base` using exactly that many bits. A block-constant channel costs zero payload bits.
+**Stage 2, block packing.** Split the image into blocks; per block, per coded channel, store the
+minimum as a *base* and subtract it. The residuals are then written by one of two coders, named in
+the header: fixed width (every residual at the block's width) or **Golomb-Rice** (each residual
+paying for its own magnitude). Rice is worth 12 points on photographs and is the default via
+`Auto`, which costs both and takes the cheaper.
 
 ## Where truth lives
 
@@ -55,7 +57,9 @@ the minimum as a *base* and the bit width needed for `max - min`, then pack ever
    2. Index by *slot* into `Header::coded_indices()`, never by raw channel number.
 8. **Decode order is fixed:** constants, blocks, unpredict, aliases. Unprediction reads neighbours
    the same loop has already restored, so it must run in raster order, and aliases must follow it.
-9. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
+9. **Under Rice a block's payload size is not computable from its header.** Rice codes are
+   variable-length. Anything that used to skip a payload has to walk it instead.
+10. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
    to measure candidates; a pipeline earns its way into `FORMAT.md` by winning on the corpus, and
    then only with a version bump and an ADR.
 
@@ -72,9 +76,10 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Format version 3: whole-image channel reduction, optional spatial prediction, block range
-packing. Block size defaults to the whole image; it is already a parameter, so a block-size sweep
-works today. Prediction defaults to `Auto`, which encodes both ways and keeps the smaller file.
+Format version 4: whole-image channel reduction, optional spatial prediction, block packing with
+a choice of fixed-width or Golomb-Rice coding. Block size defaults to the whole image; it is
+already a parameter, so a block-size sweep works today. Prediction and coder both default to
+`Auto`, which measures rather than guesses.
 
 **Compression at whole-image block size is expected to be poor on photographs** — the global
 min/max span nearly the full range, so the width code lands on 8 and nothing is saved. That is

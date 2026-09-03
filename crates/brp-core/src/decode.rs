@@ -7,14 +7,15 @@ use crate::block::BlockGrid;
 use crate::channels::ChannelMode;
 use crate::encode::sample_index;
 use crate::error::BrpError;
-use crate::header::{Header, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
+use crate::header::{Header, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
 use crate::image::{required_len, RawImage, MAX_CHANNELS};
 use crate::predict::{self, FILTER_KINDS, FILTER_KIND_BITS};
+use crate::rice;
 use crate::Result;
 
 /// Default ceiling on a decoded image, in bytes of samples.
 ///
-/// A header declares its dimensions in 26 bytes, so a tiny file can claim an enormous image. The
+/// A header declares its dimensions in 27 bytes, so a tiny file can claim an enormous image. The
 /// claim can even be legitimate — an image of constant channels really is just a header — so the
 /// bitstream length is no defence. A decoder reading untrusted files needs an explicit limit
 /// instead. 256 MiB covers an 8192x8192 RGBA image.
@@ -34,14 +35,14 @@ impl Default for DecodeOptions {
     }
 }
 
-/// Decodes a BRP v3 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
+/// Decodes a BRP v4 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
 ///
 /// Returns an error for any malformed input; never panics.
 pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     decode_with(bytes, &DecodeOptions::default())
 }
 
-/// Decodes a BRP v3 bitstream with an explicit resource limit.
+/// Decodes a BRP v4 bitstream with an explicit resource limit.
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
     let (header, header_len) = Header::parse(bytes)?;
     let stride = usize::from(header.channels);
@@ -94,34 +95,53 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
 
         for rect in grid.iter() {
             // Part 1: channel headers.
+            let rice_coded = header.block_coder == BLOCK_CODER_RICE;
             for slot in 0..coded.len() {
                 bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
-                let width_code = reader.read(WIDTH_CODE_BITS)? as u8;
-                if width_code > header.bit_depth {
-                    return Err(BrpError::InvalidWidthCode(width_code));
+                let param = reader.read(WIDTH_CODE_BITS)?;
+                if rice_coded {
+                    // Rejects the reserved modes here; the parameter is derived below.
+                    rice::parameter_for(param)?;
+                } else if param > u32::from(header.bit_depth) {
+                    return Err(BrpError::InvalidWidthCode(param as u8));
                 }
-                widths[slot] = width_code;
+                widths[slot] = param as u8;
             }
 
             // Part 2: payloads, planar.
             for slot in 0..coded.len() {
-                let nbits = u32::from(widths[slot]);
+                let param = u32::from(widths[slot]);
                 let base = bases[slot];
                 let channel = coded.channel(slot);
+                // `None` means the block carries no payload: every residual in it is zero.
+                let k = if rice_coded {
+                    rice::parameter_for(param)?
+                } else if param == 0 {
+                    None
+                } else {
+                    Some(param)
+                };
+
                 for row in 0..rect.h {
                     let mut i = sample_index(header.width, stride, rect.x, rect.y + row, channel);
-                    if nbits == 0 {
-                        // Constant within this block: no payload bits, the base is the whole story.
-                        for _ in 0..rect.w {
-                            data[i] = base;
-                            i += stride;
+                    match k {
+                        None => {
+                            for _ in 0..rect.w {
+                                data[i] = base;
+                                i += stride;
+                            }
                         }
-                    } else {
-                        for _ in 0..rect.w {
-                            let residual = reader.read(nbits)? as u8;
-                            // Wraps rather than erroring; see FORMAT.md section 8.
-                            data[i] = base.wrapping_add(residual);
-                            i += stride;
+                        Some(k) => {
+                            for _ in 0..rect.w {
+                                let residual = if rice_coded {
+                                    rice::read(&mut reader, k)? as u8
+                                } else {
+                                    reader.read(k)? as u8
+                                };
+                                // Wraps rather than erroring; see FORMAT.md section 9.
+                                data[i] = base.wrapping_add(residual);
+                                i += stride;
+                            }
                         }
                     }
                 }
@@ -163,12 +183,13 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
 mod tests {
     use super::*;
     use crate::channels::ChannelOptions;
-    use crate::encode::{encode, EncodeOptions, FilterChoice};
+    use crate::encode::{encode, CoderChoice, EncodeOptions, FilterChoice};
 
-    /// Most decoder tests want the block stream unobscured by prediction.
+    /// Most decoder tests reason about the block stream directly, so they pin both stages off.
     fn plain() -> EncodeOptions {
         EncodeOptions {
             filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
             ..Default::default()
         }
     }
@@ -188,8 +209,8 @@ mod tests {
     fn constant_channel_costs_nothing_at_all() {
         let src = img(8, 8, 1, vec![42; 64]);
         let bytes = encode(&src, &EncodeOptions::default()).unwrap();
-        // 25 fixed header bytes + modes byte + one constant. No block stream.
-        assert_eq!(bytes.len(), 27);
+        // 26 fixed header bytes + modes byte + one constant. No block stream.
+        assert_eq!(bytes.len(), 28);
         assert_eq!(decode(&bytes).unwrap(), src);
     }
 
@@ -211,7 +232,7 @@ mod tests {
     fn truncated_bitstream_is_an_error() {
         let src = img(4, 4, 3, (0..48u8).collect());
         let bytes = encode(&src, &plain()).unwrap();
-        for cut in 26..bytes.len() {
+        for cut in 27..bytes.len() {
             assert!(
                 decode(&bytes[..cut]).is_err(),
                 "truncation to {cut} bytes should fail"
@@ -225,7 +246,7 @@ mod tests {
         let mut bytes = encode(&src, &plain()).unwrap();
         // Block header is base (8 bits) then width_code (4 bits): the code is the high nibble
         // of the byte right after the header.
-        let wc_byte = 26 + 1;
+        let wc_byte = 27 + 1;
         bytes[wc_byte] = (bytes[wc_byte] & 0x0F) | 0x90; // width_code = 9
         assert_eq!(decode(&bytes).unwrap_err(), BrpError::InvalidWidthCode(9));
     }
@@ -293,6 +314,7 @@ mod tests {
                 aliases: false,
             },
             filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
         };
         let all_coded = encode(&src, &opts).unwrap();
         let reduced = encode(&src, &plain()).unwrap();
@@ -306,6 +328,7 @@ mod tests {
         EncodeOptions {
             block_size: Some((8, 8)),
             filter: choice,
+            coder: CoderChoice::Fixed,
             ..Default::default()
         }
     }
@@ -334,7 +357,7 @@ mod tests {
         let src = img(8, 8, 1, (0..64u8).map(|v| v / 2).collect());
         let mut bytes = encode(&src, &with_filter(FilterChoice::On)).unwrap();
         // The first row's predictor occupies the top three bits of the first body byte.
-        bytes[26] = (bytes[26] & 0b0001_1111) | 0b1110_0000; // kind 7
+        bytes[27] = (bytes[27] & 0b0001_1111) | 0b1110_0000; // kind 7
         assert_eq!(decode(&bytes).unwrap_err(), BrpError::InvalidFilterKind(7));
     }
 }

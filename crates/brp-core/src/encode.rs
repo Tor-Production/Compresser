@@ -5,10 +5,12 @@ use crate::block::{BlockGrid, BlockRect};
 use crate::channels::{self, ChannelOptions};
 use crate::error::BrpError;
 use crate::header::{
-    Header, BIT_DEPTH, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, WIDTH_CODE_BITS,
+    Header, BIT_DEPTH, BLOCK_CODER_FIXED, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE,
+    HEADER_BASE_SIZE, WIDTH_CODE_BITS,
 };
 use crate::image::{RawImage, MAX_CHANNELS};
 use crate::predict::{self, FILTER_KIND_BITS};
+use crate::rice;
 use crate::Result;
 
 /// Whether the encoder predicts samples from their neighbours before packing them.
@@ -23,6 +25,18 @@ pub enum FilterChoice {
     Auto,
 }
 
+/// How a block's residuals are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CoderChoice {
+    /// Every residual at the block's own fixed width. Fastest, and best on uniform data.
+    Fixed,
+    /// Golomb-Rice with a per-block parameter. Smaller on predicted residuals.
+    Rice,
+    /// Cost both over the same blocks and take the cheaper. One extra scan, not a second encode.
+    #[default]
+    Auto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncodeOptions {
     /// Block size in pixels. `None` means one block covering the whole image.
@@ -31,6 +45,8 @@ pub struct EncodeOptions {
     pub channels: ChannelOptions,
     /// Whether to predict before packing.
     pub filter: FilterChoice,
+    /// How to write each block's residuals.
+    pub coder: CoderChoice,
 }
 
 /// Bits needed to represent `v`. Zero for zero, so a constant block costs no payload.
@@ -39,10 +55,17 @@ pub(crate) fn bit_length(v: u8) -> u8 {
     (u8::BITS - v.leading_zeros()) as u8
 }
 
+/// Same, widened for the cost functions.
+#[inline]
+fn bit_length_u32(v: u8) -> u32 {
+    u32::from(bit_length(v))
+}
+
 /// Minimum and maximum of one channel within one block.
 ///
-/// The hot reduction; kept separate so it can be vectorized on its own later.
-#[inline]
+/// Superseded by [`gather_block`] on the emit path, which needs the values themselves, but kept
+/// as the reference for what a block's range means.
+#[cfg(test)]
 fn scan_block(
     data: &[u8],
     img_w: u32,
@@ -70,7 +93,71 @@ pub(crate) fn sample_index(img_w: u32, stride: usize, x: u32, y: u32, channel: u
     (y as usize * img_w as usize + x as usize) * stride + channel
 }
 
-/// Encodes an image into a BRP v3 bitstream.
+/// Collects one channel of one block, rebased on the block minimum.
+///
+/// Both coders need the residuals themselves, not just their range, so this replaces the old
+/// min/max scan. The buffer is reused across blocks.
+fn gather_block(
+    data: &[u8],
+    img_w: u32,
+    stride: usize,
+    rect: &BlockRect,
+    channel: usize,
+    out: &mut Vec<u8>,
+) -> u8 {
+    out.clear();
+    out.reserve(rect.pixel_count() as usize);
+    for row in 0..rect.h {
+        let mut i = sample_index(img_w, stride, rect.x, rect.y + row, channel);
+        for _ in 0..rect.w {
+            out.push(data[i]);
+            i += stride;
+        }
+    }
+    let base = out.iter().copied().min().unwrap_or(0);
+    for v in out.iter_mut() {
+        *v -= base;
+    }
+    base
+}
+
+/// Payload bits the fixed-width coder spends on a rebased block.
+fn fixed_block_cost(values: &[u8]) -> u64 {
+    let width = values.iter().copied().max().map_or(0, bit_length_u32);
+    values.len() as u64 * u64::from(width)
+}
+
+/// Costs both coders over every block and returns whichever spends fewer bits.
+///
+/// This is one extra scan rather than a second encode: the per-block work is the same gather both
+/// coders would do anyway, and no bits are emitted.
+fn cheaper_coder(
+    data: &[u8],
+    img_w: u32,
+    stride: usize,
+    coded: &crate::channels::CodedIndices,
+    grid: &BlockGrid,
+) -> u8 {
+    let mut fixed = 0u64;
+    let mut rice_bits = 0u64;
+    let mut values = Vec::new();
+
+    for rect in grid.iter() {
+        for slot in 0..coded.len() {
+            gather_block(data, img_w, stride, &rect, coded.channel(slot), &mut values);
+            fixed += fixed_block_cost(&values);
+            rice_bits += rice::choose_mode(&values).1;
+        }
+    }
+
+    if rice_bits < fixed {
+        BLOCK_CODER_RICE
+    } else {
+        BLOCK_CODER_FIXED
+    }
+}
+
+/// Encodes an image into a BRP v4 bitstream.
 pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     match opts.filter {
         FilterChoice::Off => encode_with_filter(img, opts, false),
@@ -117,6 +204,17 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
     };
     let data: &[u8] = residuals.as_deref().unwrap_or(source);
 
+    let grid = BlockGrid::new(img.width(), img.height(), block_w, block_h);
+    let block_coder = if coded.is_empty() {
+        BLOCK_CODER_FIXED
+    } else {
+        match opts.coder {
+            CoderChoice::Fixed => BLOCK_CODER_FIXED,
+            CoderChoice::Rice => BLOCK_CODER_RICE,
+            CoderChoice::Auto => cheaper_coder(data, img.width(), stride, &coded, &grid),
+        }
+    };
+
     let header = Header {
         width: img.width(),
         height: img.height(),
@@ -129,6 +227,7 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
         } else {
             FILTER_MODE_NONE
         },
+        block_coder,
         plan,
     };
 
@@ -140,43 +239,56 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
         return Ok(out);
     }
 
-    // Stage 2: block range packing over the coded channels.
-    let grid = BlockGrid::new(img.width(), img.height(), block_w, block_h);
+    // Stage 2: block packing over the coded channels.
     let mut writer = BitWriter::with_capacity(data.len());
 
     // The per-row predictors come first, so a decoder has them before it needs them.
     for &kind in &kinds {
         writer.write(u32::from(kind), FILTER_KIND_BITS);
     }
+
     let mut bases = [0u8; MAX_CHANNELS];
-    let mut widths = [0u8; MAX_CHANNELS];
+    let mut params = [0u32; MAX_CHANNELS];
+    let mut values: [Vec<u8>; MAX_CHANNELS] = Default::default();
 
     for rect in grid.iter() {
         for slot in 0..coded.len() {
-            let (min, max) = scan_block(data, img.width(), stride, &rect, coded.channel(slot));
-            bases[slot] = min;
-            widths[slot] = bit_length(max - min);
+            bases[slot] = gather_block(
+                data,
+                img.width(),
+                stride,
+                &rect,
+                coded.channel(slot),
+                &mut values[slot],
+            );
+            params[slot] = if block_coder == BLOCK_CODER_RICE {
+                rice::choose_mode(&values[slot]).0
+            } else {
+                u32::from(values[slot].iter().copied().max().map_or(0, bit_length))
+            };
         }
 
-        // Part 1: every channel's header, so a decoder can size the payload before reading it.
+        // Part 1: every channel's parameters, before any payload.
         for slot in 0..coded.len() {
             writer.write(u32::from(bases[slot]), u32::from(BIT_DEPTH));
-            writer.write(u32::from(widths[slot]), WIDTH_CODE_BITS);
+            writer.write(params[slot], WIDTH_CODE_BITS);
         }
 
         // Part 2: the payloads, planar.
         for slot in 0..coded.len() {
-            let nbits = u32::from(widths[slot]);
-            if nbits == 0 {
-                continue; // constant within this block: the base alone reconstructs it
-            }
-            let base = bases[slot];
-            let channel = coded.channel(slot);
-            for row in 0..rect.h {
-                let mut i = sample_index(img.width(), stride, rect.x, rect.y + row, channel);
-                for _ in 0..rect.w {
-                    writer.write(u32::from(data[i] - base), nbits);
-                    i += stride;
+            if block_coder == BLOCK_CODER_RICE {
+                if let Some(k) = rice::parameter_for(params[slot])? {
+                    for &v in &values[slot] {
+                        rice::write(&mut writer, u32::from(v), k);
+                    }
+                }
+            } else {
+                let nbits = params[slot];
+                if nbits == 0 {
+                    continue; // constant within this block: the base alone reconstructs it
+                }
+                for &v in &values[slot] {
+                    writer.write(u32::from(v), nbits);
                 }
             }
         }
@@ -261,8 +373,8 @@ mod tests {
                 ..Default::default()
             };
             let bytes = encode(&img, &opts).unwrap();
-            // 25 fixed bytes + modes byte + three constants.
-            assert_eq!(bytes.len(), 29, "block {block:?}");
+            // 26 fixed bytes + modes byte + three constants.
+            assert_eq!(bytes.len(), 30, "block {block:?}");
         }
     }
 

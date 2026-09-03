@@ -4,7 +4,7 @@
 //! the bit pack/unpack in both directions; block size changes their balance, because small blocks
 //! mean more scans and more header writes per pixel.
 
-use brp_core::{decode, encode, EncodeOptions, FilterChoice, RawImage};
+use brp_core::{decode, encode, CoderChoice, EncodeOptions, FilterChoice, RawImage};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
@@ -56,24 +56,32 @@ fn label(block: Option<u32>) -> String {
     }
 }
 
-/// Prediction doubles the work at `Auto`, so each configuration is measured explicitly.
-fn opts_for(block: Option<u32>, filter: FilterChoice) -> EncodeOptions {
+/// Each configuration is pinned rather than left to `Auto`, which would encode more than once and
+/// blur what is being timed.
+fn opts_for(block: Option<u32>, filter: FilterChoice, coder: CoderChoice) -> EncodeOptions {
     EncodeOptions {
         block_size: block.map(|n| (n, n)),
         filter,
+        coder,
         ..Default::default()
     }
 }
 
-const FILTERS: [(&str, FilterChoice); 2] = [("", FilterChoice::Off), ("+pred", FilterChoice::On)];
+/// The stages worth separating: the plain packer, prediction alone, and both stages with Rice —
+/// which is what the format reaches for by default.
+const CONFIGS: [(&str, FilterChoice, CoderChoice); 3] = [
+    ("", FilterChoice::Off, CoderChoice::Fixed),
+    ("+pred", FilterChoice::On, CoderChoice::Fixed),
+    ("+pred+rice", FilterChoice::On, CoderChoice::Rice),
+];
 
 fn bench_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode");
     for (name, img) in workloads() {
         group.throughput(Throughput::Bytes(img.data().len() as u64));
         for &block in BLOCKS {
-            for (suffix, filter) in FILTERS {
-                let opts = opts_for(block, filter);
+            for (suffix, filter, coder) in CONFIGS {
+                let opts = opts_for(block, filter, coder);
                 let id = BenchmarkId::new(name, format!("{}{suffix}", label(block)));
                 group.bench_with_input(id, &opts, |b, opts| {
                     b.iter(|| encode(black_box(&img), black_box(opts)).unwrap())
@@ -89,8 +97,8 @@ fn bench_decode(c: &mut Criterion) {
     for (name, img) in workloads() {
         group.throughput(Throughput::Bytes(img.data().len() as u64));
         for &block in BLOCKS {
-            for (suffix, filter) in FILTERS {
-                let bytes = encode(&img, &opts_for(block, filter)).unwrap();
+            for (suffix, filter, coder) in CONFIGS {
+                let bytes = encode(&img, &opts_for(block, filter, coder)).unwrap();
                 let id = BenchmarkId::new(name, format!("{}{suffix}", label(block)));
                 group.bench_with_input(id, &bytes, |b, bytes| {
                     b.iter(|| decode(black_box(bytes)).unwrap())

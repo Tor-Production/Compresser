@@ -5,21 +5,25 @@
 //! the change was unintended, or the format version must be bumped and an ADR written. Do not
 //! regenerate the expected bytes to make a failure go away.
 //!
-//! Every fixture pins its filter choice explicitly. The default is `Auto`, which encodes twice and
-//! keeps the smaller file, so leaving it to the default would make these fixtures depend on which
-//! way that comparison happened to fall.
+//! Every fixture pins its filter and coder choices explicitly. Both default to a mode that tries
+//! more than one encoding and keeps the smaller, so leaving them to the default would make these
+//! fixtures depend on which way that comparison happened to fall.
 
-use brp_core::{decode, encode, ChannelOptions, EncodeOptions, FilterChoice, RawImage};
+use brp_core::{
+    decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage,
+};
 
-fn unpredicted(block: Option<(u32, u32)>) -> EncodeOptions {
+/// No prediction, fixed-width block packing: the plainest encoding the format can produce.
+fn plain(block: Option<(u32, u32)>) -> EncodeOptions {
     EncodeOptions {
         block_size: block,
         channels: ChannelOptions::default(),
         filter: FilterChoice::Off,
+        coder: CoderChoice::Fixed,
     }
 }
 
-/// 2x2 RGBA. Green and alpha are constant; red and blue are coded. Prediction off.
+/// 2x2 RGBA. Green and alpha are constant; red and blue are coded.
 ///
 /// Pixels (R, G, B, A):
 ///   (0,0) = 10, 100, 200, 255      (1,0) = 13, 100, 210, 255
@@ -48,9 +52,9 @@ fn rgba_with_constant_channels() {
 
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
-        // -- header, 28 bytes --
+        // -- header, 29 bytes --
         b'B', b'R', b'P', 0x1A,
-        3,                      // version
+        4,                      // version
         0,                      // flags
         2, 0, 0, 0,             // width
         2, 0, 0, 0,             // height
@@ -59,6 +63,7 @@ fn rgba_with_constant_channels() {
         2, 0, 0, 0,             // block_w
         2, 0, 0, 0,             // block_h
         0,                      // filter mode: none
+        0,                      // block coder: fixed width
         0x44,                   // channel modes: R coded, G constant, B coded, A constant
         100,                    // constant for G
         255,                    // constant for A
@@ -66,12 +71,12 @@ fn rgba_with_constant_channels() {
         0x0A, 0x2C, 0x74, 0x36, 0x1B, 0x60,
     ];
 
-    let actual = encode(&src, &unpredicted(None)).unwrap();
+    let actual = encode(&src, &plain(None)).unwrap();
     assert_eq!(
         actual, expected,
         "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
     );
-    assert_eq!(actual.len(), 34);
+    assert_eq!(actual.len(), 35);
     assert_eq!(decode(&expected).unwrap(), src);
 }
 
@@ -84,7 +89,7 @@ fn constant_grayscale_is_header_only() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        3,
+        4,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -93,19 +98,20 @@ fn constant_grayscale_is_header_only() {
         2, 0, 0, 0,
         2, 0, 0, 0,
         0,                      // filter mode: nothing to predict
+        0,                      // block coder: nothing to code
         0x01,                   // channel modes: channel 0 constant
         7,                      // its value
     ];
 
-    // Auto must reach the same file: with no coded channel there is nothing to predict.
-    for opts in [unpredicted(None), EncodeOptions::default()] {
+    // Every setting must reach the same file: with no coded channel there is nothing to choose.
+    for opts in [plain(None), EncodeOptions::default()] {
         let actual = encode(&src, &opts).unwrap();
         assert_eq!(
             actual, expected,
             "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
         );
     }
-    assert_eq!(expected.len(), 27);
+    assert_eq!(expected.len(), 28);
     assert_eq!(decode(&expected).unwrap(), src);
 }
 
@@ -127,7 +133,7 @@ fn grayscale_carried_in_rgb() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        3,
+        4,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -136,18 +142,19 @@ fn grayscale_carried_in_rgb() {
         2, 0, 0, 0,
         2, 0, 0, 0,
         0,                      // filter mode: none
+        0,                      // block coder: fixed width
         0x28,                   // channel modes: R coded, G alias, B alias
         0x00,                   // alias targets: both channel 0
         // -- body, 4 bytes --
         0x0A, 0x50, 0x2A, 0x9E,
     ];
 
-    let actual = encode(&src, &unpredicted(None)).unwrap();
+    let actual = encode(&src, &plain(None)).unwrap();
     assert_eq!(
         actual, expected,
         "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
     );
-    assert_eq!(actual.len(), 31);
+    assert_eq!(actual.len(), 32);
     assert_eq!(decode(&expected).unwrap(), src);
 }
 
@@ -168,8 +175,8 @@ fn grayscale_carried_in_rgb() {
 ///   00000100 0101              base 4, width code 5
 ///   10000 00000 00100 00000    residuals 16, 0, 4, 0
 ///
-/// Encoded with `FilterChoice::On`, not `Auto`: on a 2x2 image the unpredicted file is smaller
-/// (29 bytes against 31), because two rows of filter codes cost more than they save.
+/// Encoded with `FilterChoice::On`, not the default: on a 2x2 image the unpredicted file is
+/// smaller, because two rows of filter codes cost more than they save.
 #[test]
 fn prediction_and_zigzag() {
     let src = RawImage::new(2, 2, 1, vec![10, 12, 14, 16]).unwrap();
@@ -177,7 +184,7 @@ fn prediction_and_zigzag() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        3,
+        4,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -186,15 +193,70 @@ fn prediction_and_zigzag() {
         2, 0, 0, 0,
         2, 0, 0, 0,
         1,                      // filter mode: adaptive
+        0,                      // block coder: fixed width
         0x00,                   // channel modes: coded
         // -- body, 5 bytes --
         0x30, 0x11, 0x60, 0x02, 0x00,
     ];
 
     let opts = EncodeOptions {
-        block_size: None,
-        channels: ChannelOptions::default(),
         filter: FilterChoice::On,
+        ..plain(None)
+    };
+    let actual = encode(&src, &opts).unwrap();
+    assert_eq!(
+        actual, expected,
+        "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
+    );
+    assert_eq!(actual.len(), 32);
+    assert_eq!(decode(&expected).unwrap(), src);
+
+    // And the claim in the doc comment above, so it cannot rot.
+    assert_eq!(encode(&src, &plain(None)).unwrap().len(), 30);
+}
+
+/// 2x2 grayscale with Golomb-Rice packing, pinning the mode field and the unary codes.
+///
+/// Samples 10, 12, 14, 16 give base 10 and residuals 0, 2, 4, 6. Payload bits per parameter:
+/// k=0 costs 16, k=1 costs 14, k=2 costs 14, k=3 costs 16. The first minimum wins, so k = 1 and
+/// the mode field is `k + 1` = 2.
+///
+/// Codes at k = 1 — a unary quotient, a terminating zero, then one low bit:
+///   0 -> q 0 -> `0` `0`            2 bits
+///   2 -> q 1 -> `1` `0` `0`        3 bits
+///   4 -> q 2 -> `11` `0` `0`       4 bits
+///   6 -> q 3 -> `111` `0` `0`      5 bits
+///
+/// Body bits, 26 of them plus 6 of padding:
+///   00001010 0010 | 00 100 1100 11100
+///
+/// Encoded with `CoderChoice::Rice` rather than the default: on four samples fixed width is
+/// smaller (30 bytes against 31), so `Auto` would pick it.
+#[test]
+fn rice_coded_block() {
+    let src = RawImage::new(2, 2, 1, vec![10, 12, 14, 16]).unwrap();
+
+    #[rustfmt::skip]
+    let expected: Vec<u8> = vec![
+        b'B', b'R', b'P', 0x1A,
+        4,
+        0,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+        1,                      // channels
+        8,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+        0,                      // filter mode: none
+        1,                      // block coder: Golomb-Rice
+        0x00,                   // channel modes: coded
+        // -- body, 4 bytes --
+        0x0A, 0x22, 0x67, 0x00,
+    ];
+
+    let opts = EncodeOptions {
+        coder: CoderChoice::Rice,
+        ..plain(None)
     };
     let actual = encode(&src, &opts).unwrap();
     assert_eq!(
@@ -204,10 +266,40 @@ fn prediction_and_zigzag() {
     assert_eq!(actual.len(), 31);
     assert_eq!(decode(&expected).unwrap(), src);
 
-    // And the claim in the doc comment above, so it cannot rot.
-    let plain = encode(&src, &unpredicted(None)).unwrap();
-    assert_eq!(plain.len(), 29);
-    assert_eq!(encode(&src, &EncodeOptions::default()).unwrap(), plain);
+    // The claim above: fixed width wins on an image this small, and `Auto` finds that.
+    assert_eq!(encode(&src, &plain(None)).unwrap().len(), 30);
+    let auto = EncodeOptions {
+        coder: CoderChoice::Auto,
+        ..plain(None)
+    };
+    assert_eq!(encode(&src, &auto).unwrap().len(), 30);
+}
+
+/// A block whose residuals are all zero uses Rice mode 0 and emits no payload — the case plain
+/// Rice would charge one bit per sample for.
+#[test]
+fn rice_constant_block_has_no_payload() {
+    // Two channels so stage 1 cannot elide everything: red is flat per block, blue varies.
+    let mut data = Vec::new();
+    for y in 0..4u8 {
+        for x in 0..4u8 {
+            data.extend_from_slice(&[if y < 2 { 30 } else { 90 }, 0, x * 9]);
+        }
+    }
+    let src = RawImage::new(4, 4, 3, data).unwrap();
+
+    let opts = EncodeOptions {
+        block_size: Some((2, 2)),
+        coder: CoderChoice::Rice,
+        ..plain(None)
+    };
+    let bytes = encode(&src, &opts).unwrap();
+    assert_eq!(bytes[25], 1, "block coder is Rice");
+    assert_eq!(decode(&bytes).unwrap(), src);
+
+    let a = brp_core::analyze(&bytes).unwrap();
+    // Red is constant within every 2x2 block, so every one of its blocks takes mode 0.
+    assert_eq!(a.width_code_histogram[0][0], 4, "four blocks, all mode 0");
 }
 
 /// Locks the header field offsets in `FORMAT.md` section 3 against accidental reordering.
@@ -216,10 +308,10 @@ fn header_field_offsets() {
     // Values chosen so no channel is constant and none aliases another.
     let data: Vec<u8> = (0..15u8).map(|i| i * 3 + (i % 3) * 7).collect();
     let src = RawImage::new(5, 1, 3, data).unwrap();
-    let bytes = encode(&src, &unpredicted(Some((2, 4)))).unwrap();
+    let bytes = encode(&src, &plain(Some((2, 4)))).unwrap();
 
     assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-    assert_eq!(bytes[4], 3);
+    assert_eq!(bytes[4], 4);
     assert_eq!(bytes[5], 0);
     assert_eq!(&bytes[6..10], &5u32.to_le_bytes());
     assert_eq!(&bytes[10..14], &1u32.to_le_bytes());
@@ -228,5 +320,6 @@ fn header_field_offsets() {
     assert_eq!(&bytes[16..20], &2u32.to_le_bytes());
     assert_eq!(&bytes[20..24], &4u32.to_le_bytes());
     assert_eq!(bytes[24], 0, "filter mode");
-    assert_eq!(bytes[25], 0x00, "all three channels coded");
+    assert_eq!(bytes[25], 0, "block coder");
+    assert_eq!(bytes[26], 0x00, "all three channels coded");
 }

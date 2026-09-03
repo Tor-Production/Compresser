@@ -22,57 +22,53 @@ one byte for its value replaces the whole channel.
 
 ## Status
 
-Format version 3, and a measurement harness that has twice changed the plan.
+Format version 4. Four stages, each admitted only after measurement said so.
 
-**Stage 1** removes whole-image redundancy before any block is considered: a channel whose samples
-are all identical becomes one header byte, and a channel identical to an earlier one becomes a
-reference. A solid colour is a 29-byte header at any resolution; grayscale stored as RGB costs one
-channel instead of three.
+**Stage 1** removes whole-image redundancy: a channel whose samples are all identical becomes one
+header byte, and a channel identical to an earlier one becomes a reference. A solid colour is a
+30-byte header at any resolution; grayscale stored as RGB costs one channel instead of three.
 
-**Stage 1.5** predicts each sample from its neighbours, choosing one of PNG's five predictors per
-row, and stores the *zigzagged* difference. Optional, and on by default via `Auto`, which encodes
-both ways and keeps the smaller file.
+**Stage 1.5** predicts each sample from its neighbours, one of PNG's five predictors per row, and
+stores the *zigzagged* difference.
 
-**Stage 2** is the block range packing above, at a block size that defaults to the whole image.
+**Stage 2** splits the image into blocks and, per block per channel, stores the minimum as a base
+and writes the residuals — either at one fixed width, or with **Golomb-Rice**, which charges each
+residual for its own magnitude.
+
+Prediction and coder both default to `Auto`: the encoder measures rather than guesses.
 
 ### What the measurements say
 
-`brp-lab` runs a dozen-plus pipelines over both corpora, verifies each is lossless, and times both
-directions. Full tables and reasoning in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
-
-On six Kodak photographs (6.8 MiB raw):
+On six Kodak photographs (6.8 MiB raw), 8x8 blocks:
 
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
-| `filter+deflate` — what PNG does | **59.2%** | 9 MiB/s | 103 MiB/s |
-| `brp[8x8]` + Deflate on top | 65.6% | 16 MiB/s | 85 MiB/s |
+| `filter+deflate` — a tuned PNG-style pipeline | **59.2%** | 9 MiB/s | 108 MiB/s |
+| **BRP v4, default settings** | **62.5%** | 17 MiB/s | 55 MiB/s |
+| BRP v4 with Deflate on top | 61.6% | 13 MiB/s | 50 MiB/s |
 | `raw+deflate` | 66.9% | 30 MiB/s | 196 MiB/s |
-| `quadtree` (lab only, not in the format) | 73.8% | 35 MiB/s | 177 MiB/s |
-| **`brp[8x8]`, version 3** | **74.4%** | 36 MiB/s | 122 MiB/s |
-| `brp[8x8]`, version 2 | 77.8% | 209 MiB/s | 235 MiB/s |
-| `brp[whole]` | 100.0% | 188 MiB/s | 200 MiB/s |
+| BRP v3 (prediction, fixed width) | 74.4% | 37 MiB/s | 120 MiB/s |
+| BRP v2 (no prediction) | 77.8% | 209 MiB/s | 254 MiB/s |
 
-Four findings worth stating plainly:
+Against real encoders on the same photographs: the `image` crate's PNG output is 67.5%, WebP
+lossless 49.9%. So BRP now beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
+pipeline by 3.3 points, and trails WebP by more.
 
-- **PNG's spatial prediction beats block range packing on photographs.** Version 3 closed the gap
-  from 19 points to 15 by adopting prediction, but the remaining gap is real. Where BRP wins is
-  speed.
-- **The corpus decides the conclusion.** On synthetic images alone, `brp+deflate` came *first*,
-  ahead of PNG's approach. Adding photographs reversed it. Never judge this codec on generated
+Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
+
+- **The corpus decides the conclusion.** On synthetic images alone an earlier version came *first*,
+  ahead of PNG's approach; adding photographs reversed it. Never judge this codec on generated
   images.
-- **Prediction and range packing fight each other unless residuals are zigzagged.** Composing them
-  naively produces a file *larger than raw* (102.3%), because a residual of -1 stored as 255 makes
-  a block of tiny residuals span the whole byte range. Interleaving the signs is worth 28
-  percentage points.
-- **Two plausible improvements measured worse.** Choosing a predictor per channel gains nothing,
-  and optimising the largest residual rather than their sum — which looks right, since the width
-  code is set by the extreme — loses 1.8 points. PNG's choices survived contact with the data.
-
-**Next, and already measured:** replacing fixed-width block packing with Golomb-Rice takes
-photographs from 74.4% to **62.5%** — 12 points from swapping one coder, table-free, and it makes
-an LZ77 stage unnecessary. Our residuals turn out to be geometric once prediction has run (57% of
-them fit in three bits), and Rice is the coder that distribution asks for. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+- **Prediction and range packing fight each other unless residuals are zigzagged.** Composed
+  naively they produce a file *larger than raw* (102.3%). Interleaving the signs is worth 28 points.
+- **Our residuals are geometric, and Golomb-Rice is the coder that asks for.** 57% of them fit in
+  three bits. Swapping only the block coder was worth 12 points, it needs no code table, and it
+  makes an LZ77 stage nearly pointless (0.6 points).
+- **Four plausible improvements measured worse and were dropped**: per-channel predictor choice,
+  optimising the largest residual rather than their sum, patched frame-of-reference, and a
+  per-block choice between fixed width and Rice.
+- **Speed is the cost.** Every stage added has spent throughput: 209 MiB/s encode at v2, 17 at v4.
+  Most of that is the unary loop, not the algorithm, and it is the next thing to fix.
 
 ## Build and use
 
@@ -85,7 +81,7 @@ cargo run -p brp-cli --release -- encode input.png output.brp --block-size 16x16
 ```
 
 ```bash
-cargo run -p brp-cli --release -- encode input.png output.brp --filter off
+cargo run -p brp-cli --release -- encode input.png output.brp --filter off --coder fixed
 ```
 
 ```bash
@@ -133,7 +129,7 @@ prints a table has also proved the round-trip on real image data.
 | `crates/brp-imageio` | PNG and WebP bridge, shared by the CLI and the benchmark. |
 | `crates/brp-cli` | `encode` / `decode` / `info`. |
 | `crates/brp-bench` | Compression-ratio table against PNG and WebP, plus the sample generator. |
-| `crates/brp-lab` | Experimental pipelines: quadtree, Rice, patched frame-of-reference, Huffman, LZW, Deflate, PNG-style filters. Not part of the format. |
+| `crates/brp-lab` | Experimental pipelines and the `residual-shape` tool. Not part of the format. |
 | `docs/FORMAT.md` | Normative bitstream specification. Outranks the code. |
 | `docs/ARCHITECTURE.md` | Module map, data flow, invariants. |
 | `docs/EXPERIMENTS.md` | Measured results, and what they say to build next. |

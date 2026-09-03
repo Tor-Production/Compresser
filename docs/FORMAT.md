@@ -1,4 +1,4 @@
-# BRP v3 — Block Range Packing bitstream specification
+# BRP v4 — Block Range Packing bitstream specification
 
 **Status:** normative. The implementation in `crates/brp-core` MUST match this document.
 Golden-byte tests in `crates/brp-core/tests/golden.rs` enforce the match. Any change to this
@@ -27,19 +27,21 @@ five predictors — the same five PNG defines — shared by every coded channel,
 replaced by the *zigzagged* difference from its prediction. Stage 2 then packs those residuals
 instead of the samples.
 
-**Stage 2, block range packing.** The image is divided into a grid of blocks. Within each block,
-each coded channel is packed independently:
+**Stage 2, block packing.** The image is divided into a grid of blocks. Within each block, each
+coded channel has its minimum stored as a *base* and subtracted from every sample, leaving
+residuals in `0 ..= (max - min)`. Those residuals are then written by one of two coders, named once
+for the whole file in `block_coder`:
 
-1. Find `min` and `max` of that channel over the block.
-2. Store `min` as the block's *base* for that channel.
-3. Subtract the base from every sample, giving *residuals* in `0 ..= (max - min)`.
-4. Compute the number of bits needed to represent `max - min`; call it the *width code*.
-5. Store the width code, then pack every residual using exactly that many bits.
+- **Fixed width** — the number of bits needed for `max - min` is stored, and every residual is
+  packed at exactly that width. Fast, and best when residuals are spread evenly.
+- **Golomb-Rice** — a parameter is stored and each residual is written as a unary quotient plus
+  that many low bits, so each sample pays for its own magnitude. Smaller when residuals are
+  concentrated near zero, which is what prediction produces.
 
-If `max == min`, the width code is 0 and no residual bits are emitted — the base alone
-reconstructs the block. A whole-image constant channel would also hit this path, but stage 1 is
-still worth having: it removes the width-code field from *every* block rather than just its
-payload, which at small block sizes dominates.
+If `max == min` neither coder emits any payload — the base alone reconstructs the block. A
+whole-image constant channel would also hit that path, but stage 1 is still worth having: it
+removes the per-block field from *every* block rather than just its payload, which at small block
+sizes dominates.
 
 ## 2. Conventions
 
@@ -58,25 +60,26 @@ Byte-aligned, at offset 0.
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
 | 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
-| 4      | `version`       | u8   | `3`                                                       |
+| 4      | `version`       | u8   | `4`                                                       |
 | 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
 | 10     | `height`        | u32  | pixels, MUST be > 0                                       |
 | 14     | `channels`      | u8   | 1 = Gray, 2 = Gray+Alpha, 3 = RGB, 4 = RGBA               |
-| 15     | `bit_depth`     | u8   | MUST be 8 in version 3                                    |
+| 15     | `bit_depth`     | u8   | MUST be 8 in version 4                                    |
 | 16     | `block_w`       | u32  | pixels, MUST be > 0                                       |
 | 20     | `block_h`       | u32  | pixels, MUST be > 0                                       |
 | 24     | `filter_mode`   | u8   | 0 = no prediction, 1 = adaptive per-row — see section 5   |
-| 25     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
-| 26     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
+| 25     | `block_coder`   | u8   | 0 = fixed width, 1 = Golomb-Rice — see section 6          |
+| 26     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
+| 27     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
 | …      | `constants`     | n B  | one byte per CONSTANT channel, ascending channel order    |
 
 The trailing 0x1A in the magic is the same trick PNG uses: it terminates output under `type` on
 DOS-derived shells and turns text-mode mangling into an early mismatch instead of silent
 corruption. The magic carries no version, so the `version` byte is the single source of truth.
 
-Header length is therefore `26 + (1 if any alias) + (number of constant channels)`, between 26 and
-31 bytes. The body bitstream starts at the next byte.
+Header length is therefore `27 + (1 if any alias) + (number of constant channels)`, between 27 and
+32 bytes. The body bitstream starts at the next byte.
 
 `filter_mode` MUST be 0 when no channel is `CODED`: with nothing to predict, prediction has no
 canonical encoding, and allowing both values would make two different files mean the same image.
@@ -171,33 +174,60 @@ For each block, in raster order, the following is written with no alignment betw
 
 ```
 Part 1 — channel headers, for each c in coded_channels, in order:
-    base[c]       : bit_depth bits    (the channel minimum over this block)
-    width_code[c] : 4 bits            (bits per residual, 0 ..= 8)
+    base[c]  : bit_depth bits    (the channel minimum over this block)
+    param[c] : 4 bits            (a width code or a Rice mode — see 6.1 and 6.2)
 
 Part 2 — channel payloads, for each c in coded_channels, in order:
-    if width_code[c] == 0:  nothing at all
-    else:                   bw * bh residuals, width_code[c] bits each,
-                            in raster order within the block,
-                            each residual = sample - base[c]
+    bw * bh residuals in raster order within the block,
+    each residual = sample - base[c], written as 6.1 or 6.2 requires
 ```
 
-Headers precede payloads for the whole block (rather than being interleaved per channel) so that a
-decoder can compute a block's exact payload size before reading it. This enables block skipping and
-parallel decoding in later versions.
+Headers precede payloads for the whole block, rather than being interleaved per channel.
 
-### 6.1 Width code
+**Note on block sizes.** Under fixed-width packing a decoder can compute a block's exact payload
+size from its headers alone, which would allow block skipping and parallel decode. Rice codes are
+variable-length, so that property does not hold when `block_coder` is 1. Recovering it would need
+an explicit table of block offsets, and is deliberately left out: it costs bits, nothing in the
+codec uses it yet, and Rice is worth twelve percentage points.
+
+### 6.1 Fixed width (`block_coder` = 0)
+
+`param[c]` is a *width code*: the number of bits each residual occupies.
 
 ```
 width_code = bit_length(max - min)
 ```
 
 where `bit_length(0) == 0`. For 8-bit samples this is `8 - (max - min).leading_zeros()`, giving a
-value in `0 ..= 8`, which is why the field is 4 bits wide.
+value in `0 ..= 8`, which is why the field is 4 bits wide. A width code of 0 means every residual
+is zero and the block has no payload.
 
 Worked example from the design brief: a block whose channel spans `max - min == 15`
 (`0b0000_1111`) has `leading_zeros == 4`, so `width_code == 4` — four bits per sample.
 
 A decoder MUST reject `width_code > bit_depth`.
+
+### 6.2 Golomb-Rice (`block_coder` = 1)
+
+`param[c]` is a *mode*:
+
+| Mode | Meaning |
+|-----:|---------|
+| 0 | Every residual is zero. No payload at all. |
+| 1..=9 | Rice with parameter `k = mode - 1`. |
+| 10..=15 | Reserved. MUST be rejected. |
+
+Mode 0 exists because Rice alone cannot express "no bits": at `k = 0` a block of zeros would still
+cost one bit per sample, a case fixed-width packing gets free and flat image regions hit constantly.
+
+A residual `v` at parameter `k` is written as `q = v >> k` one-bits, then a zero, then the low `k`
+bits of `v`. When `q` reaches 8 the encoding escapes: eight one-bits with no terminator, followed
+by `v` verbatim in `bit_depth` bits. Without the escape a large residual at a small `k` would need
+a unary prefix hundreds of bits long.
+
+An encoder chooses the mode freely — the choice affects size, never correctness. The reference
+encoder costs all nine parameters exactly and takes the cheapest, preferring the smaller `k` on a
+tie.
 
 ## 7. Reconstruction order
 
@@ -219,8 +249,11 @@ For one block of `n = bw * bh` pixels over `k = coded_channels.len()` channels:
 ```
 prediction bits = height * 3          (once per file, when filter_mode is 1)
 header bits     = k * (bit_depth + 4)
-payload bits    = n * sum(width_code[c] for c in coded_channels)
+payload bits    = n * sum(width_code[c])           under fixed width
+                  sum over samples of their code   under Rice
 ```
+
+Rice payload size cannot be computed from the headers; measuring it means walking the codes.
 
 Stage 1 is what makes the header cost disappear for degenerate channels. A solid-colour 4K RGB
 image at 8x8 blocks would otherwise pay `3 * 12` bits across 393216 blocks — 1.7 MB of pure
@@ -231,7 +264,7 @@ overhead — and instead costs 28 bytes in total.
 A decoder MUST reject, with an error and never a panic:
 
 - `magic` != `42 52 50 1A`
-- `version` != 3
+- `version` != 4
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
 - any of `width`, `height`, `block_w`, `block_h` == 0
@@ -239,6 +272,9 @@ A decoder MUST reject, with an error and never a panic:
 - `filter_mode` above 1
 - `filter_mode` of 1 with no `CODED` channel
 - a filter kind above 4
+- `block_coder` above 1
+- a width code above `bit_depth`, under `block_coder` 0
+- a Rice mode above 9, under `block_coder` 1
 - a channel mode of 3
 - `channel_modes` bits set for channels at or above `channels`
 - channel 0 with mode `ALIAS`
@@ -252,7 +288,7 @@ A decoder MUST reject, with an error and never a panic:
 Trailing bytes beyond the last block are ignored, but the padding bits of the final data byte MUST
 be zero and are checked.
 
-**Resource limits.** A header declares its dimensions in 26 bytes, and a well-formed file of
+**Resource limits.** A header declares its dimensions in 27 bytes, and a well-formed file of
 constant channels legitimately decodes to an image of any size at all. The bitstream length
 therefore places no useful bound on the output, and a decoder reading untrusted files MUST impose
 its own limit on the decoded image size and refuse anything above it. This is decoder policy rather
@@ -272,3 +308,4 @@ is already the full width of the bit depth.
 | 1 | Initial format: per-block, per-channel base + fixed-width residual packing; constant-alpha elision via a single flag bit. Magic was `BRP1`. |
 | 2 | Version-independent magic. Constant-channel elision generalised from alpha to every channel, and channel aliasing added, both as a whole-image stage before block packing. Replaces the v1 `ALPHA_CONSTANT` flag. |
 | 3 | Optional spatial prediction with zigzagged residuals, selected per row from PNG's five predictors, recorded in a new `filter_mode` header byte. |
+| 4 | Golomb-Rice as an alternative block coder, selected per file by a new `block_coder` header byte. Gives up the ability to compute a block's payload size from its headers. |

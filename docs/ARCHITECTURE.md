@@ -23,6 +23,7 @@ image.rs    RawImage { width, height, channels, data: Vec<u8> }
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
 channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
 predict.rs  Stage 1.5 — per-row predictor choice and zigzagged residuals.
+rice.rs     Golomb-Rice codes and per-block parameter choice, one of two block coders.
 header.rs   Header struct, write_to()/parse(). Byte-aligned, little-endian.
 block.rs    BlockGrid — iterator over clipped block rectangles.
 encode.rs   Stage 2 — scan_block() -> per-channel base/width_code, then emit.
@@ -33,7 +34,7 @@ analysis.rs Walks a bitstream without reconstructing pixels. Backs `brp info`.
 ## Data flow
 
 ```
-encode:  RawImage ──▶ channel plan ──▶ predict ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
+encode:  RawImage ──▶ channel plan ──▶ predict ──▶ pick coder ──▶ Header ──▶ [per block: gather → headers → payloads] ──▶ Vec<u8>
 decode:  &[u8] ──▶ Header::parse ──▶ constants ──▶ [per block: headers → payloads] ──▶ unpredict ──▶ aliases ──▶ RawImage
 ```
 
@@ -41,6 +42,10 @@ Only *coded* channels reach the block grid, and they are not necessarily a prefi
 list — an RGB image whose green aliases red codes channels 0 and 2. Every loop therefore indexes by
 *slot* into `Header::coded_indices()`, never by raw channel number. Getting this wrong produces a
 codec that works on RGB and silently corrupts RGBA.
+
+Two block coders share the same per-block 4-bit field: a width code under fixed packing, a Rice
+mode under Rice. Under Rice the payload is variable-length, so nothing may assume a block's size
+can be computed from its header — `analyze` has to walk the codes rather than skip them.
 
 The decode order is not a preference: constants, then blocks, then unpredict, then aliases.
 Unprediction must run in raster order because each prediction reads neighbours the same loop has

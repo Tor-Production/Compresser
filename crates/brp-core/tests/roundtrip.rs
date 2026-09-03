@@ -1,7 +1,8 @@
 //! Invariant 1 from `docs/ARCHITECTURE.md`: `decode(encode(img)) == img`, byte for byte.
 
 use brp_core::{
-    analyze, decode, encode, ChannelMode, ChannelOptions, EncodeOptions, FilterChoice, RawImage,
+    analyze, decode, encode, ChannelMode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
+    RawImage,
 };
 
 /// Every block size worth exercising, including ones that do not divide the image evenly.
@@ -39,23 +40,29 @@ const CHANNEL_OPTIONS: &[ChannelOptions] = &[
 /// Every prediction choice, so a bug in one path cannot hide behind another.
 const FILTERS: &[FilterChoice] = &[FilterChoice::Off, FilterChoice::On, FilterChoice::Auto];
 
+/// Every block coder, likewise.
+const CODERS: &[CoderChoice] = &[CoderChoice::Fixed, CoderChoice::Rice, CoderChoice::Auto];
+
 fn assert_round_trips(src: &RawImage) {
     for &block_size in BLOCK_SIZES {
         for &channels in CHANNEL_OPTIONS {
             for &filter in FILTERS {
-                let opts = EncodeOptions {
-                    block_size,
-                    channels,
-                    filter,
-                };
-                let bytes = encode(src, &opts).unwrap();
-                let back = decode(&bytes).unwrap();
-                assert_eq!(
-                    &back, src,
-                    "block_size {block_size:?}, channels {channels:?}, filter {filter:?}"
-                );
-                // Anything that decodes must also analyze, and vice versa.
-                analyze(&bytes).unwrap();
+                for &coder in CODERS {
+                    let opts = EncodeOptions {
+                        block_size,
+                        channels,
+                        filter,
+                        coder,
+                    };
+                    let bytes = encode(src, &opts).unwrap();
+                    let back = decode(&bytes).unwrap();
+                    assert_eq!(
+                        &back, src,
+                        "block {block_size:?}, channels {channels:?}, filter {filter:?}, coder {coder:?}"
+                    );
+                    // Anything that decodes must also analyze, and vice versa.
+                    analyze(&bytes).unwrap();
+                }
             }
         }
     }
@@ -65,6 +72,7 @@ fn assert_round_trips(src: &RawImage) {
 fn no_filter() -> EncodeOptions {
     EncodeOptions {
         filter: FilterChoice::Off,
+        coder: CoderChoice::Fixed,
         ..Default::default()
     }
 }
@@ -179,6 +187,7 @@ fn constant_alpha_variants() {
                     block_size: Some((3, 3)),
                     channels: ChannelOptions::default(),
                     filter: FilterChoice::Off,
+                    coder: CoderChoice::Fixed,
                 },
             )
             .unwrap();
@@ -191,6 +200,7 @@ fn constant_alpha_variants() {
                         aliases: false,
                     },
                     filter: FilterChoice::Off,
+                    coder: CoderChoice::Fixed,
                 },
             )
             .unwrap();

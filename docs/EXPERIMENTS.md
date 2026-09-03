@@ -210,22 +210,33 @@ fixed-width packing; that is an implementation cost, not an inherent one.
 
 ## Adopted into the format
 
-Prediction landed in format version 3 (ADR 0006). On the photographs, at 8x8 blocks:
+Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the
+photographs, at 8x8 blocks, with default settings:
 
-| | v2 | v3 |
-|---|---:|---:|
-| `brp[8x8]` | 77.8% | **74.4%** |
-| with Deflate on top | 75.0% | **65.6%** |
+| | v2 | v3 | v4 |
+|---|---:|---:|---:|
+| `brp[8x8]` | 77.8% | 74.4% | **62.5%** |
+| with Deflate on top | 75.0% | 65.6% | 61.6% |
+
+The v4 figure reproduces the lab prototype exactly (62.5%), so the move from experiment to format
+cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
 
 ## What this says to do next
 
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
-2. **Replace fixed-width block packing with Golomb-Rice.** Measured at 12 points on photographs,
-   table-free, and it makes an LZ77 stage unnecessary. This is the next format version.
-3. **Adaptive block size.** Still real, still the smallest of the three, and it now has to be
-   re-measured on top of Rice rather than on top of fixed width.
+2. ~~Replace fixed-width block packing with Golomb-Rice.~~ Done, version 4.
+3. **Make Rice fast.** The unary loop moves one bit at a time: encoding fell from 209 MiB/s to 17,
+   decoding from 254 to 55. Speed is the codec's actual advantage over PNG, and most of this is
+   implementation rather than algorithm — a batched unary writer and a table-driven prefix reader
+   are the obvious moves. No format change.
+4. **Context modelling for the Rice parameter.** This is where JPEG-LS gets its remaining edge:
+   choose `k` from quantised local gradients rather than per block, so the model adapts within a
+   block instead of across it.
+5. **Adaptive block size.** Still real, still the smallest, and its cost model assumed fixed-width
+   packing — it has to be rewritten around Rice before the 4-point figure means anything.
 
-Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), and
-a per-block choice between fixed and Rice (the flag costs more than it saves).
+Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
+per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage
+inside the format (0.6 points on top of Rice).
 
 Each step needs a format version bump and an ADR, and should be re-measured on both corpora.

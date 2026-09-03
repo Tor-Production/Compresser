@@ -3,14 +3,18 @@
 //! The decoder parses untrusted files. Every byte it reads is hostile until validated.
 
 use brp_core::{
-    analyze, decode, encode, BrpError, ChannelOptions, EncodeOptions, FilterChoice, RawImage,
+    analyze, decode, encode, BrpError, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
+    RawImage,
 };
 
 /// Header length when every channel is coded — no alias byte, no constants.
-const BODY_AT: usize = 26;
+const BODY_AT: usize = 27;
 
 /// Offset of the `channel_modes` byte.
-const MODES_AT: usize = 25;
+const MODES_AT: usize = 26;
+
+/// Offset of the `block_coder` byte.
+const CODER_AT: usize = 25;
 
 /// Stage 1 disabled, so every channel is coded, the header is exactly [`BODY_AT`] bytes, and there
 /// is a real block stream to corrupt.
@@ -28,6 +32,7 @@ fn sample_file() -> Vec<u8> {
             block_size: Some((2, 2)),
             channels: ALL_CODED,
             filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
         },
     )
     .unwrap()
@@ -185,6 +190,7 @@ fn arbitrary_channel_modes() {
                 block_size: Some((2, 2)),
                 channels: ALL_CODED,
                 filter: FilterChoice::Off,
+                coder: CoderChoice::Fixed,
             },
         )
         .unwrap();
@@ -212,6 +218,7 @@ fn alias_validation() {
         &src,
         &EncodeOptions {
             filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
             ..Default::default()
         },
     )
@@ -289,6 +296,7 @@ fn invalid_filter_kinds_are_rejected() {
             block_size: Some((4, 4)),
             channels: ALL_CODED,
             filter: FilterChoice::On,
+            coder: CoderChoice::Fixed,
         },
     )
     .unwrap();
@@ -305,6 +313,60 @@ fn invalid_filter_kinds_are_rejected() {
             decoded.is_ok(),
             analyzed.is_ok(),
             "decode and analyze disagree on filter byte {b:#04x}"
+        );
+    }
+}
+
+/// Every possible `block_coder` byte. Only 0 and 1 exist; the rest must be refused.
+#[test]
+fn arbitrary_block_coders() {
+    let original = sample_file();
+    for coder in 0..=255u8 {
+        let mut bytes = original.clone();
+        bytes[CODER_AT] = coder;
+        let decoded = decode(&bytes);
+        let analyzed = analyze(&bytes);
+        assert_eq!(
+            decoded.is_ok(),
+            analyzed.is_ok(),
+            "decode and analyze disagree on block coder {coder}"
+        );
+        if coder > 1 {
+            assert!(matches!(
+                decoded.unwrap_err(),
+                BrpError::UnsupportedBlockCoder(_)
+            ));
+        }
+    }
+}
+
+/// A Rice-coded file with corrupted mode fields must be refused, not silently mis-decoded.
+#[test]
+fn corrupt_rice_modes_are_rejected() {
+    let data: Vec<u8> = (0..(8 * 8)).map(|i| (i * 3 % 200) as u8).collect();
+    let src = RawImage::new(8, 8, 1, data).unwrap();
+    let original = encode(
+        &src,
+        &EncodeOptions {
+            block_size: Some((4, 4)),
+            channels: ALL_CODED,
+            filter: FilterChoice::Off,
+            coder: CoderChoice::Rice,
+        },
+    )
+    .unwrap();
+    assert_eq!(original[CODER_AT], 1, "Rice coding is on");
+    assert!(decode(&original).is_ok());
+
+    for b in 0..=255u8 {
+        let mut bytes = original.clone();
+        bytes[BODY_AT + 1] = b;
+        let decoded = decode(&bytes);
+        let analyzed = analyze(&bytes);
+        assert_eq!(
+            decoded.is_ok(),
+            analyzed.is_ok(),
+            "decode and analyze disagree on Rice mode byte {b:#04x}"
         );
     }
 }

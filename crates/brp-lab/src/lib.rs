@@ -92,6 +92,8 @@ pub struct Brp {
     pub entropy: Entropy,
     /// Which prediction setting the format itself is asked to use.
     pub filter: brp_core::FilterChoice,
+    /// Which block coder the format itself is asked to use.
+    pub coder: brp_core::CoderChoice,
 }
 
 impl Codec for Brp {
@@ -105,13 +107,19 @@ impl Codec for Brp {
             brp_core::FilterChoice::On => ",pred",
             brp_core::FilterChoice::Auto => ",auto",
         };
-        format!("brp[{block}{f}]{}", self.entropy.suffix())
+        let c = match self.coder {
+            brp_core::CoderChoice::Fixed => "",
+            brp_core::CoderChoice::Rice => ",rice",
+            brp_core::CoderChoice::Auto => ",bestcoder",
+        };
+        format!("brp[{block}{f}{c}]{}", self.entropy.suffix())
     }
 
     fn encode(&self, img: &RawImage) -> Result<Vec<u8>> {
         let opts = brp_core::EncodeOptions {
             block_size: self.block.map(|n| (n, n)),
             filter: self.filter,
+            coder: self.coder,
             ..Default::default()
         };
         let raw = brp_core::encode(img, &opts).map_err(|e| anyhow::anyhow!(e))?;
@@ -236,6 +244,7 @@ impl Codec for FilteredBrp {
         let opts = brp_core::EncodeOptions {
             block_size: self.block.map(|n| (n, n)),
             filter: brp_core::FilterChoice::Off,
+            coder: brp_core::CoderChoice::Fixed,
             ..Default::default()
         };
         let packed = brp_core::encode(&residuals, &opts).map_err(|e| anyhow::anyhow!(e))?;
@@ -292,6 +301,7 @@ impl Codec for Predicted {
         let opts = brp_core::EncodeOptions {
             block_size: self.block.map(|n| (n, n)),
             filter: brp_core::FilterChoice::Off,
+            coder: brp_core::CoderChoice::Fixed,
             ..Default::default()
         };
         let packed = brp_core::encode(&residuals, &opts).map_err(|e| anyhow::anyhow!(e))?;
@@ -352,24 +362,39 @@ impl Codec for Packed {
 /// The pipelines the runner measures, in report order.
 pub fn all_codecs() -> Vec<Box<dyn Codec>> {
     use blockpack::BlockCoder;
-    use brp_core::FilterChoice;
+    use brp_core::{CoderChoice, FilterChoice};
 
     let mut v: Vec<Box<dyn Codec>> = vec![
-        // The format as it stands, at both ends of the block-size range.
+        // The format as it stands, and what each stage contributes.
         Box::new(Brp {
             block: None,
             entropy: Entropy::None,
             filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
+        }),
+        Box::new(Brp {
+            block: Some(8),
+            entropy: Entropy::None,
+            filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
         }),
         Box::new(Brp {
             block: Some(8),
             entropy: Entropy::None,
             filter: FilterChoice::Auto,
+            coder: CoderChoice::Fixed,
+        }),
+        Box::new(Brp {
+            block: Some(8),
+            entropy: Entropy::None,
+            filter: FilterChoice::Auto,
+            coder: CoderChoice::Auto,
         }),
         Box::new(Brp {
             block: Some(8),
             entropy: Entropy::Deflate,
             filter: FilterChoice::Auto,
+            coder: CoderChoice::Auto,
         }),
         // Adaptive block size, still a candidate.
         Box::new(Quadtree {
