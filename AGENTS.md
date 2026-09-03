@@ -13,6 +13,10 @@ identical, so the value moves to the header and the channel leaves the bitstream
 earlier channel (identical samples, so a grayscale image stored as RGB costs one channel), or
 *coded*.
 
+**Stage 1.5, spatial prediction** (optional, `filter_mode` in the header). Each row picks one of
+PNG's five predictors and every sample becomes the **zigzagged** difference from its prediction.
+The zigzag is not cosmetic — without it this stage makes files *larger than raw*.
+
 **Stage 2, block range packing.** Split the image into blocks; per block, per coded channel, store
 the minimum as a *base* and the bit width needed for `max - min`, then pack every sample as
 `sample - base` using exactly that many bits. A block-constant channel costs zero payload bits.
@@ -49,7 +53,9 @@ the minimum as a *base* and the bit width needed for `max - min`, then pack ever
    bit packing elsewhere.
 7. **Coded channels are not a prefix.** An RGB image whose green aliases red codes channels 0 and
    2. Index by *slot* into `Header::coded_indices()`, never by raw channel number.
-8. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
+8. **Decode order is fixed:** constants, blocks, unpredict, aliases. Unprediction reads neighbours
+   the same loop has already restored, so it must run in raster order, and aliases must follow it.
+9. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
    to measure candidates; a pipeline earns its way into `FORMAT.md` by winning on the corpus, and
    then only with a version bump and an ADR.
 
@@ -66,8 +72,9 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Format version 2. Block size defaults to the whole image; it is already a parameter, so a
-block-size sweep works today.
+Format version 3: whole-image channel reduction, optional spatial prediction, block range
+packing. Block size defaults to the whole image; it is already a parameter, so a block-size sweep
+works today. Prediction defaults to `Auto`, which encodes both ways and keeps the smaller file.
 
 **Compression at whole-image block size is expected to be poor on photographs** — the global
 min/max span nearly the full range, so the width code lands on 8 and nothing is saved. That is

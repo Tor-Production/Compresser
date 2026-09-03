@@ -124,12 +124,36 @@ the difference is Deflate's Huffman stage. Dictionary matching alone is not wher
 speed at acceptable ratio rather than best ratio, the current design already has a case; that is a
 product decision, not a measurement.
 
+### 7. Prediction shape: two hypotheses, both wrong
+
+Before adopting prediction into the format, two variants were measured against PNG's choices.
+
+**Per-channel filter selection.** Letting each channel pick its own predictor costs three more bits
+per channel per row. Measured 74.6% against 74.5% for one shared choice — no gain.
+
+**Minimising the largest residual.** A range coder's width code is set by the extreme value in a
+block, so optimising the row's maximum instead of its sum looked obviously right. It measures
+*worse*: 76.3% against 74.5%. A row crosses many blocks, and minimising its single worst pixel
+sacrifices every other block the row passes through.
+
+PNG's two choices — one predictor per row, chosen by sum of absolute residuals — win on both
+counts, and are what the format adopted.
+
+## Adopted into the format
+
+Prediction landed in format version 3 (ADR 0006). On the photographs, at 8x8 blocks:
+
+| | v2 | v3 |
+|---|---:|---:|
+| `brp[8x8]` | 77.8% | **74.4%** |
+| with Deflate on top | 75.0% | **65.6%** |
+
 ## What this says to do next
 
-1. **Adopt prediction with zigzagged residuals into the format.** It is the largest single win
-   available and it composes with everything already built.
-2. **Then entropy-code the residuals.** Huffman gets most of the way; Deflate's dictionary adds
-   less once prediction has removed the spatial redundancy.
+1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
+2. **Entropy-code the residuals.** Huffman gets most of the way; Deflate's dictionary adds less
+   once prediction has removed the spatial redundancy. Bringing an entropy stage inside the format
+   would close most of the remaining gap to `filter+deflate`.
 3. **Adaptive block size last.** Real, but the smallest of the three, and it partly cancels against
    entropy coding.
 

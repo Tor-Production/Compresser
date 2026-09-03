@@ -2,10 +2,15 @@
 //!
 //! The decoder parses untrusted files. Every byte it reads is hostile until validated.
 
-use brp_core::{analyze, decode, encode, BrpError, ChannelOptions, EncodeOptions, RawImage};
+use brp_core::{
+    analyze, decode, encode, BrpError, ChannelOptions, EncodeOptions, FilterChoice, RawImage,
+};
 
 /// Header length when every channel is coded — no alias byte, no constants.
-const BODY_AT: usize = 25;
+const BODY_AT: usize = 26;
+
+/// Offset of the `channel_modes` byte.
+const MODES_AT: usize = 25;
 
 /// Stage 1 disabled, so every channel is coded, the header is exactly [`BODY_AT`] bytes, and there
 /// is a real block stream to corrupt.
@@ -22,6 +27,7 @@ fn sample_file() -> Vec<u8> {
         &EncodeOptions {
             block_size: Some((2, 2)),
             channels: ALL_CODED,
+            filter: FilterChoice::Off,
         },
     )
     .unwrap()
@@ -53,7 +59,7 @@ fn bad_magic() {
     assert_eq!(decode(&bytes).unwrap_err(), BrpError::BadMagic);
 }
 
-/// The v1 magic must not be mistaken for a v2 file.
+/// The v1 magic must not be mistaken for a current file.
 #[test]
 fn the_previous_format_generation_is_rejected() {
     let mut bytes = sample_file();
@@ -140,7 +146,7 @@ fn one_corrupt_byte_cannot_demand_an_enormous_allocation() {
     ));
 }
 
-/// Version 2 reserves the whole flags byte.
+/// Version 3 reserves the whole flags byte.
 #[test]
 fn reserved_flag_bits_are_rejected() {
     for bit in 0..8 {
@@ -178,13 +184,14 @@ fn arbitrary_channel_modes() {
             &EncodeOptions {
                 block_size: Some((2, 2)),
                 channels: ALL_CODED,
+                filter: FilterChoice::Off,
             },
         )
         .unwrap();
 
         for modes in 0..=255u8 {
             let mut bytes = original.clone();
-            bytes[24] = modes;
+            bytes[MODES_AT] = modes;
             let decoded = decode(&bytes);
             let analyzed = analyze(&bytes);
             assert_eq!(
@@ -201,13 +208,20 @@ fn alias_validation() {
     // Grayscale in RGB, so channels 1 and 2 both alias channel 0.
     let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, v]).collect();
     let src = RawImage::new(4, 4, 3, data).unwrap();
-    let original = encode(&src, &EncodeOptions::default()).unwrap();
-    assert_eq!(original[24], 0x28, "R coded, G alias, B alias");
+    let original = encode(
+        &src,
+        &EncodeOptions {
+            filter: FilterChoice::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(original[MODES_AT], 0x28, "R coded, G alias, B alias");
     assert!(decode(&original).is_ok());
 
     // Channel 1 pointing at itself is a forward reference.
     let mut bytes = original.clone();
-    bytes[25] = 0b01;
+    bytes[MODES_AT + 1] = 0b01;
     assert_eq!(
         decode(&bytes).unwrap_err(),
         BrpError::InvalidAliasTarget {
@@ -218,7 +232,7 @@ fn alias_validation() {
 
     // Channel 2 pointing at channel 1, which is itself an alias: a chain.
     let mut bytes = original.clone();
-    bytes[25] = 0b01_00;
+    bytes[MODES_AT + 1] = 0b01_00;
     assert_eq!(
         decode(&bytes).unwrap_err(),
         BrpError::AliasTargetNotCoded {
@@ -229,7 +243,7 @@ fn alias_validation() {
 
     // Bits beyond the two aliases present must be clear.
     let mut bytes = original.clone();
-    bytes[25] = 0b0001_0000;
+    bytes[MODES_AT + 1] = 0b0001_0000;
     assert_eq!(
         decode(&bytes).unwrap_err(),
         BrpError::AliasTargetBitsSet(0b0001_0000)
@@ -237,8 +251,62 @@ fn alias_validation() {
 
     // Channel 0 can never alias.
     let mut bytes = original.clone();
-    bytes[24] = 0b00_00_00_10;
+    bytes[MODES_AT] = 0b00_00_00_10;
     assert_eq!(decode(&bytes).unwrap_err(), BrpError::AliasOnFirstChannel);
+}
+
+/// Every possible `filter_mode` byte. Only 0 and 1 exist; the rest must be refused.
+#[test]
+fn arbitrary_filter_modes() {
+    let original = sample_file();
+    for mode in 0..=255u8 {
+        let mut bytes = original.clone();
+        bytes[24] = mode;
+        let decoded = decode(&bytes);
+        let analyzed = analyze(&bytes);
+        assert_eq!(
+            decoded.is_ok(),
+            analyzed.is_ok(),
+            "decode and analyze disagree on filter mode {mode}"
+        );
+        if mode > 1 {
+            assert!(matches!(
+                decoded.unwrap_err(),
+                BrpError::UnsupportedFilterMode(_)
+            ));
+        }
+    }
+}
+
+/// A predicted file whose filter kinds are corrupted must be refused, not silently mis-decoded.
+#[test]
+fn invalid_filter_kinds_are_rejected() {
+    let data: Vec<u8> = (0..(8 * 8)).map(|i| (i / 2) as u8).collect();
+    let src = RawImage::new(8, 8, 1, data).unwrap();
+    let original = encode(
+        &src,
+        &EncodeOptions {
+            block_size: Some((4, 4)),
+            channels: ALL_CODED,
+            filter: FilterChoice::On,
+        },
+    )
+    .unwrap();
+    assert_eq!(original[24], 1, "prediction is on");
+    assert!(decode(&original).is_ok());
+
+    // Sweep the first body byte, which carries the first two rows' predictors and part of a third.
+    for b in 0..=255u8 {
+        let mut bytes = original.clone();
+        bytes[BODY_AT] = b;
+        let decoded = decode(&bytes);
+        let analyzed = analyze(&bytes);
+        assert_eq!(
+            decoded.is_ok(),
+            analyzed.is_ok(),
+            "decode and analyze disagree on filter byte {b:#04x}"
+        );
+    }
 }
 
 /// Sweeps the whole byte range through the first two body bytes, which carry a base and part of a

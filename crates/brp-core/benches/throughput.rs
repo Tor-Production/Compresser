@@ -4,7 +4,7 @@
 //! the bit pack/unpack in both directions; block size changes their balance, because small blocks
 //! mean more scans and more header writes per pixel.
 
-use brp_core::{decode, encode, EncodeOptions, RawImage};
+use brp_core::{decode, encode, EncodeOptions, FilterChoice, RawImage};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
@@ -56,18 +56,29 @@ fn label(block: Option<u32>) -> String {
     }
 }
 
+/// Prediction doubles the work at `Auto`, so each configuration is measured explicitly.
+fn opts_for(block: Option<u32>, filter: FilterChoice) -> EncodeOptions {
+    EncodeOptions {
+        block_size: block.map(|n| (n, n)),
+        filter,
+        ..Default::default()
+    }
+}
+
+const FILTERS: [(&str, FilterChoice); 2] = [("", FilterChoice::Off), ("+pred", FilterChoice::On)];
+
 fn bench_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode");
     for (name, img) in workloads() {
         group.throughput(Throughput::Bytes(img.data().len() as u64));
         for &block in BLOCKS {
-            let opts = EncodeOptions {
-                block_size: block.map(|n| (n, n)),
-                ..Default::default()
-            };
-            group.bench_with_input(BenchmarkId::new(name, label(block)), &opts, |b, opts| {
-                b.iter(|| encode(black_box(&img), black_box(opts)).unwrap())
-            });
+            for (suffix, filter) in FILTERS {
+                let opts = opts_for(block, filter);
+                let id = BenchmarkId::new(name, format!("{}{suffix}", label(block)));
+                group.bench_with_input(id, &opts, |b, opts| {
+                    b.iter(|| encode(black_box(&img), black_box(opts)).unwrap())
+                });
+            }
         }
     }
     group.finish();
@@ -78,14 +89,13 @@ fn bench_decode(c: &mut Criterion) {
     for (name, img) in workloads() {
         group.throughput(Throughput::Bytes(img.data().len() as u64));
         for &block in BLOCKS {
-            let opts = EncodeOptions {
-                block_size: block.map(|n| (n, n)),
-                ..Default::default()
-            };
-            let bytes = encode(&img, &opts).unwrap();
-            group.bench_with_input(BenchmarkId::new(name, label(block)), &bytes, |b, bytes| {
-                b.iter(|| decode(black_box(bytes)).unwrap())
-            });
+            for (suffix, filter) in FILTERS {
+                let bytes = encode(&img, &opts_for(block, filter)).unwrap();
+                let id = BenchmarkId::new(name, format!("{}{suffix}", label(block)));
+                group.bench_with_input(id, &bytes, |b, bytes| {
+                    b.iter(|| decode(black_box(bytes)).unwrap())
+                });
+            }
         }
     }
     group.finish();

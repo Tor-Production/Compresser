@@ -6,7 +6,7 @@
 //! Usage: `cargo run -p brp-bench --release -- samples/`
 
 use anyhow::{bail, Context, Result};
-use brp_core::{decode, encode, EncodeOptions, RawImage};
+use brp_core::{decode, encode, EncodeOptions, FilterChoice, RawImage};
 use std::path::{Path, PathBuf};
 
 /// `None` is the whole image as one block — the iteration-1 default.
@@ -75,6 +75,7 @@ fn measure(path: &Path) -> Result<Row> {
     for &block in BLOCK_SIZES {
         let opts = EncodeOptions {
             block_size: block.map(|n| (n, n)),
+            filter: FilterChoice::Auto,
             ..Default::default()
         };
         let bytes = encode(&img, &opts).map_err(|e| anyhow::anyhow!(e))?;

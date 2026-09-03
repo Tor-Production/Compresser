@@ -27,16 +27,21 @@ mod encode;
 mod error;
 mod header;
 mod image;
+mod predict;
 
 pub use analysis::{analyze, Analysis, BlockInfo};
 pub use bitio::{BitReader, BitWriter};
 pub use block::{BlockGrid, BlockRect};
 pub use channels::{plan as plan_channels, ChannelMode, ChannelOptions, ChannelPlan, CodedIndices};
 pub use decode::{decode, decode_with, DecodeOptions, DEFAULT_MAX_IMAGE_BYTES};
-pub use encode::{encode, EncodeOptions};
+pub use encode::{encode, EncodeOptions, FilterChoice};
 pub use error::BrpError;
-pub use header::{Header, BIT_DEPTH, HEADER_BASE_SIZE, MAGIC, VERSION, WIDTH_CODE_BITS};
+pub use header::{
+    Header, BIT_DEPTH, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, MAGIC, VERSION,
+    WIDTH_CODE_BITS,
+};
 pub use image::{required_len, RawImage, MAX_CHANNELS};
+pub use predict::{unzigzag, zigzag, FILTER_KINDS, FILTER_KIND_BITS};
 
 /// Result type used throughout the crate.
 pub type Result<T> = core::result::Result<T, BrpError>;

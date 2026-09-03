@@ -11,19 +11,24 @@ use crate::Result;
 /// Version-independent by design — the `version` byte is the single source of truth. See ADR 0004.
 pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 
-/// The only bit depth version 2 defines.
+/// The only bit depth version 3 defines.
 pub const BIT_DEPTH: u8 = 8;
 
 /// Width of the `width_code` field. Four bits, because the code ranges over `0..=8`.
 pub const WIDTH_CODE_BITS: u32 = 4;
 
 /// Header length up to and including `channel_modes`, before aliases and constants.
-pub const HEADER_BASE_SIZE: usize = 25;
+pub const HEADER_BASE_SIZE: usize = 26;
 
 /// Offset of the channel section within the header.
-const CHANNEL_SECTION_AT: usize = 24;
+const CHANNEL_SECTION_AT: usize = 25;
+
+/// Prediction is off: the block stream codes samples directly.
+pub const FILTER_MODE_NONE: u8 = 0;
+/// Adaptive per-row predictor with zigzagged residuals, as in `FORMAT.md` section 5.
+pub const FILTER_MODE_ADAPTIVE: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -33,6 +38,8 @@ pub struct Header {
     pub bit_depth: u8,
     pub block_w: u32,
     pub block_h: u32,
+    /// [`FILTER_MODE_NONE`] or [`FILTER_MODE_ADAPTIVE`].
+    pub filter_mode: u8,
     pub plan: ChannelPlan,
 }
 
@@ -66,6 +73,7 @@ impl Header {
         out.push(self.bit_depth);
         out.extend_from_slice(&self.block_w.to_le_bytes());
         out.extend_from_slice(&self.block_h.to_le_bytes());
+        out.push(self.filter_mode);
         self.plan.write_to(out);
     }
 
@@ -121,7 +129,17 @@ impl Header {
         // Rejects images that could not be addressed even if the bitstream were complete.
         required_len(width, height, channels)?;
 
+        let filter_mode = bytes[24];
+        if filter_mode > FILTER_MODE_ADAPTIVE {
+            return Err(BrpError::UnsupportedFilterMode(filter_mode));
+        }
+
         let (plan, plan_len) = ChannelPlan::parse(&bytes[CHANNEL_SECTION_AT..], channels)?;
+
+        // Prediction with nothing to predict has no canonical encoding; refuse the ambiguity.
+        if filter_mode == FILTER_MODE_ADAPTIVE && plan.coded_count() == 0 {
+            return Err(BrpError::FilterWithoutCodedChannels);
+        }
 
         Ok((
             Self {
@@ -131,6 +149,7 @@ impl Header {
                 bit_depth,
                 block_w,
                 block_h,
+                filter_mode,
                 plan,
             },
             CHANNEL_SECTION_AT + plan_len,
@@ -151,6 +170,7 @@ mod tests {
             bit_depth: BIT_DEPTH,
             block_w: 640,
             block_h: 480,
+            filter_mode: FILTER_MODE_NONE,
             plan: ChannelPlan::all_coded(4),
         }
     }
@@ -198,7 +218,7 @@ mod tests {
     fn field_offsets_match_the_spec() {
         let bytes = encoded(&sample());
         assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-        assert_eq!(bytes[4], 2); // version
+        assert_eq!(bytes[4], 3); // version
         assert_eq!(bytes[5], 0); // flags
         assert_eq!(&bytes[6..10], &640u32.to_le_bytes());
         assert_eq!(&bytes[10..14], &480u32.to_le_bytes());
@@ -206,7 +226,8 @@ mod tests {
         assert_eq!(bytes[15], 8); // bit depth
         assert_eq!(&bytes[16..20], &640u32.to_le_bytes());
         assert_eq!(&bytes[20..24], &480u32.to_le_bytes());
-        assert_eq!(bytes[24], 0); // channel modes: all coded
+        assert_eq!(bytes[24], 0); // filter mode: none
+        assert_eq!(bytes[25], 0); // channel modes: all coded
     }
 
     #[test]
@@ -216,12 +237,12 @@ mod tests {
         assert_eq!(Header::parse(&bytes).unwrap_err(), BrpError::BadMagic);
 
         let mut bytes = encoded(&sample());
-        bytes[4] = 1;
+        bytes[4] = 2;
         assert_eq!(
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedVersion {
-                found: 1,
-                expected: 2
+                found: 2,
+                expected: 3
             }
         );
     }
@@ -270,6 +291,37 @@ mod tests {
         assert_eq!(
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedBitDepth(16)
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_filter_mode() {
+        for mode in 2..=255u8 {
+            let mut bytes = encoded(&sample());
+            bytes[24] = mode;
+            assert_eq!(
+                Header::parse(&bytes).unwrap_err(),
+                BrpError::UnsupportedFilterMode(mode)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_prediction_with_nothing_to_predict() {
+        // Every channel constant, so no channel reaches the block stream.
+        let data = vec![7u8; 4 * 4 * 3];
+        let plan = crate::channels::plan(&data, 3, &ChannelOptions::default());
+        let h = Header {
+            width: 4,
+            height: 4,
+            channels: 3,
+            filter_mode: FILTER_MODE_ADAPTIVE,
+            plan,
+            ..sample()
+        };
+        assert_eq!(
+            Header::parse(&encoded(&h)).unwrap_err(),
+            BrpError::FilterWithoutCodedChannels
         );
     }
 

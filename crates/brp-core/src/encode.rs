@@ -4,9 +4,24 @@ use crate::bitio::BitWriter;
 use crate::block::{BlockGrid, BlockRect};
 use crate::channels::{self, ChannelOptions};
 use crate::error::BrpError;
-use crate::header::{Header, BIT_DEPTH, HEADER_BASE_SIZE, WIDTH_CODE_BITS};
+use crate::header::{
+    Header, BIT_DEPTH, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, WIDTH_CODE_BITS,
+};
 use crate::image::{RawImage, MAX_CHANNELS};
+use crate::predict::{self, FILTER_KIND_BITS};
 use crate::Result;
+
+/// Whether the encoder predicts samples from their neighbours before packing them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterChoice {
+    /// Never predict. Fastest, and best on images the block packer already handles well.
+    Off,
+    /// Always predict.
+    On,
+    /// Encode both ways and keep the smaller file. Roughly doubles encode time.
+    #[default]
+    Auto,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncodeOptions {
@@ -14,6 +29,8 @@ pub struct EncodeOptions {
     pub block_size: Option<(u32, u32)>,
     /// Which whole-image channel reductions to apply in stage 1.
     pub channels: ChannelOptions,
+    /// Whether to predict before packing.
+    pub filter: FilterChoice,
 }
 
 /// Bits needed to represent `v`. Zero for zero, so a constant block costs no payload.
@@ -53,8 +70,26 @@ pub(crate) fn sample_index(img_w: u32, stride: usize, x: u32, y: u32, channel: u
     (y as usize * img_w as usize + x as usize) * stride + channel
 }
 
-/// Encodes an image into a BRP v2 bitstream.
+/// Encodes an image into a BRP v3 bitstream.
 pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    match opts.filter {
+        FilterChoice::Off => encode_with_filter(img, opts, false),
+        FilterChoice::On => encode_with_filter(img, opts, true),
+        FilterChoice::Auto => {
+            // Prediction helps photographs and hurts some synthetic content, and which it is
+            // cannot be told cheaply from the samples. Encoding is fast; try both.
+            let plain = encode_with_filter(img, opts, false)?;
+            let predicted = encode_with_filter(img, opts, true)?;
+            Ok(if predicted.len() < plain.len() {
+                predicted
+            } else {
+                plain
+            })
+        }
+    }
+}
+
+fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Result<Vec<u8>> {
     let (block_w, block_h) = opts.block_size.unwrap_or((img.width(), img.height()));
     if block_w == 0 {
         return Err(BrpError::ZeroDimension { what: "block_w" });
@@ -64,11 +99,23 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     }
 
     let stride = usize::from(img.channels());
-    let data = img.data();
+    let source = img.data();
 
-    // Stage 1: classify channels across the whole image.
-    let plan = channels::plan(data, img.channels(), &opts.channels);
+    // Stage 1: classify channels across the whole image, from the samples themselves.
+    let plan = channels::plan(source, img.channels(), &opts.channels);
     let coded = plan.coded_indices();
+
+    // With nothing left to code there is nothing to predict either.
+    let filter = filter && !coded.is_empty();
+
+    // Stage 1.5: prediction, if enabled. The block packer then works on the residuals.
+    let (kinds, residuals) = if filter {
+        let (k, r) = predict::apply(source, img.width(), img.height(), stride, &coded);
+        (k, Some(r))
+    } else {
+        (Vec::new(), None)
+    };
+    let data: &[u8] = residuals.as_deref().unwrap_or(source);
 
     let header = Header {
         width: img.width(),
@@ -77,6 +124,11 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
         bit_depth: BIT_DEPTH,
         block_w,
         block_h,
+        filter_mode: if filter {
+            FILTER_MODE_ADAPTIVE
+        } else {
+            FILTER_MODE_NONE
+        },
         plan,
     };
 
@@ -91,6 +143,11 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     // Stage 2: block range packing over the coded channels.
     let grid = BlockGrid::new(img.width(), img.height(), block_w, block_h);
     let mut writer = BitWriter::with_capacity(data.len());
+
+    // The per-row predictors come first, so a decoder has them before it needs them.
+    for &kind in &kinds {
+        writer.write(u32::from(kind), FILTER_KIND_BITS);
+    }
     let mut bases = [0u8; MAX_CHANNELS];
     let mut widths = [0u8; MAX_CHANNELS];
 
@@ -204,8 +261,49 @@ mod tests {
                 ..Default::default()
             };
             let bytes = encode(&img, &opts).unwrap();
-            // 24 fixed bytes + modes byte + three constants.
-            assert_eq!(bytes.len(), 28, "block {block:?}");
+            // 25 fixed bytes + modes byte + three constants.
+            assert_eq!(bytes.len(), 29, "block {block:?}");
+        }
+    }
+
+    /// `Auto` must never produce a larger file than either fixed choice.
+    #[test]
+    fn auto_picks_the_smaller_encoding() {
+        let noise: Vec<u8> = (0..(24 * 24 * 3))
+            .map(|i: u32| {
+                let mut v = i.wrapping_mul(2_654_435_761);
+                v ^= v >> 13;
+                v as u8
+            })
+            .collect();
+        let smooth: Vec<u8> = (0..(24 * 24 * 3))
+            .map(|i| (40 + (i / 3) % 4) as u8)
+            .collect();
+
+        for data in [noise, smooth] {
+            let img = RawImage::new(24, 24, 3, data).unwrap();
+            let base = EncodeOptions {
+                block_size: Some((8, 8)),
+                ..Default::default()
+            };
+            let off = encode(
+                &img,
+                &EncodeOptions {
+                    filter: FilterChoice::Off,
+                    ..base.clone()
+                },
+            )
+            .unwrap();
+            let on = encode(
+                &img,
+                &EncodeOptions {
+                    filter: FilterChoice::On,
+                    ..base.clone()
+                },
+            )
+            .unwrap();
+            let auto = encode(&img, &base).unwrap();
+            assert_eq!(auto.len(), on.len().min(off.len()));
         }
     }
 }

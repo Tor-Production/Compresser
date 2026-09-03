@@ -15,6 +15,7 @@ use std::io::Write;
 pub mod filters;
 pub mod huffman;
 pub mod lzw;
+pub mod predict;
 pub mod quadtree;
 
 /// One compression pipeline, end to end.
@@ -88,6 +89,8 @@ impl Entropy {
 pub struct Brp {
     pub block: Option<u32>,
     pub entropy: Entropy,
+    /// Which prediction setting the format itself is asked to use.
+    pub filter: brp_core::FilterChoice,
 }
 
 impl Codec for Brp {
@@ -96,12 +99,18 @@ impl Codec for Brp {
             None => "whole".to_string(),
             Some(n) => format!("{n}x{n}"),
         };
-        format!("brp[{block}]{}", self.entropy.suffix())
+        let f = match self.filter {
+            brp_core::FilterChoice::Off => "",
+            brp_core::FilterChoice::On => ",pred",
+            brp_core::FilterChoice::Auto => ",auto",
+        };
+        format!("brp[{block}{f}]{}", self.entropy.suffix())
     }
 
     fn encode(&self, img: &RawImage) -> Result<Vec<u8>> {
         let opts = brp_core::EncodeOptions {
             block_size: self.block.map(|n| (n, n)),
+            filter: self.filter,
             ..Default::default()
         };
         let raw = brp_core::encode(img, &opts).map_err(|e| anyhow::anyhow!(e))?;
@@ -225,6 +234,7 @@ impl Codec for FilteredBrp {
         };
         let opts = brp_core::EncodeOptions {
             block_size: self.block.map(|n| (n, n)),
+            filter: brp_core::FilterChoice::Off,
             ..Default::default()
         };
         let packed = brp_core::encode(&residuals, &opts).map_err(|e| anyhow::anyhow!(e))?;
@@ -252,80 +262,140 @@ impl Codec for FilteredBrp {
     }
 }
 
+/// Range-shaped prediction, then BRP. The variant study behind roadmap item 1.
+pub struct Predicted {
+    pub options: predict::PredictOptions,
+    pub block: Option<u32>,
+    pub entropy: Entropy,
+}
+
+impl Codec for Predicted {
+    fn name(&self) -> String {
+        let block = match self.block {
+            None => "whole".to_string(),
+            Some(n) => format!("{n}x{n}"),
+        };
+        let h = match self.options.heuristic {
+            predict::Heuristic::Sad => "sad",
+            predict::Heuristic::MaxAbs => "max",
+        };
+        let sc = match self.options.scope {
+            predict::Scope::SharedRow => "row",
+            predict::Scope::PerChannel => "chan",
+        };
+        format!("pred[{h},{sc}]+brp[{block}]{}", self.entropy.suffix())
+    }
+
+    fn encode(&self, img: &RawImage) -> Result<Vec<u8>> {
+        let (kinds, residuals) = predict::apply(img, &self.options);
+        let opts = brp_core::EncodeOptions {
+            block_size: self.block.map(|n| (n, n)),
+            filter: brp_core::FilterChoice::Off,
+            ..Default::default()
+        };
+        let packed = brp_core::encode(&residuals, &opts).map_err(|e| anyhow::anyhow!(e))?;
+
+        let mut body = Vec::with_capacity(kinds.len() + packed.len());
+        body.extend_from_slice(&kinds);
+        body.extend_from_slice(&packed);
+
+        let mut out = (kinds.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(&self.entropy.pack(&body)?);
+        Ok(out)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<RawImage> {
+        anyhow::ensure!(bytes.len() >= 4, "stream is shorter than its header");
+        let n = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let body = self.entropy.unpack(&bytes[4..])?;
+        anyhow::ensure!(body.len() >= n, "stream is missing its filter kinds");
+        let residuals = brp_core::decode(&body[n..]).map_err(|e| anyhow::anyhow!(e))?;
+        predict::undo(&body[..n], &residuals)
+    }
+}
+
 /// The pipelines the runner measures, in report order.
 pub fn all_codecs() -> Vec<Box<dyn Codec>> {
-    vec![
-        // Baselines: the format as it stands.
+    use predict::{Heuristic, PredictOptions, Scope};
+
+    use brp_core::FilterChoice;
+
+    let mut v: Vec<Box<dyn Codec>> = vec![
+        // The format as it stands, with prediction off, on, and chosen per image.
         Box::new(Brp {
             block: None,
             entropy: Entropy::None,
+            filter: FilterChoice::Off,
         }),
         Box::new(Brp {
             block: Some(8),
             entropy: Entropy::None,
+            filter: FilterChoice::Off,
+        }),
+        Box::new(Brp {
+            block: Some(8),
+            entropy: Entropy::None,
+            filter: FilterChoice::On,
+        }),
+        Box::new(Brp {
+            block: Some(8),
+            entropy: Entropy::None,
+            filter: FilterChoice::Auto,
+        }),
+        Box::new(Brp {
+            block: Some(8),
+            entropy: Entropy::Deflate,
+            filter: FilterChoice::Auto,
         }),
         // Adaptive block size.
         Box::new(Quadtree {
             min_leaf: 2,
             entropy: Entropy::None,
         }),
-        // Entropy coding on top of the block packer.
-        Box::new(Brp {
-            block: Some(8),
-            entropy: Entropy::Huffman,
-        }),
-        Box::new(Brp {
-            block: Some(8),
-            entropy: Entropy::Deflate,
-        }),
-        // Combinations.
-        Box::new(Quadtree {
-            min_leaf: 2,
-            entropy: Entropy::Huffman,
-        }),
         Box::new(Quadtree {
             min_leaf: 2,
             entropy: Entropy::Deflate,
         }),
-        // References with no image model at all.
+        // References with no image model, and what PNG actually does.
         Box::new(Raw {
-            entropy: Entropy::Huffman,
+            entropy: Entropy::Deflate,
         }),
         Box::new(Raw {
             entropy: Entropy::Lzw,
         }),
-        Box::new(Raw {
-            entropy: Entropy::Deflate,
-        }),
-        // What PNG actually does.
-        Box::new(Filtered {
-            entropy: Entropy::Huffman,
-        }),
         Box::new(Filtered {
             entropy: Entropy::Deflate,
         }),
-        // Prediction and range packing together.
-        Box::new(FilteredBrp {
-            block: Some(8),
-            entropy: Entropy::None,
-            zigzag: false,
-        }),
-        Box::new(FilteredBrp {
-            block: Some(8),
-            entropy: Entropy::None,
-            zigzag: true,
-        }),
-        Box::new(FilteredBrp {
-            block: Some(8),
+        Box::new(Filtered {
             entropy: Entropy::Huffman,
-            zigzag: true,
         }),
-        Box::new(FilteredBrp {
+    ];
+
+    // Roadmap item 1: which prediction shape should enter the format?
+    for heuristic in [Heuristic::Sad, Heuristic::MaxAbs] {
+        for scope in [Scope::SharedRow, Scope::PerChannel] {
+            let options = PredictOptions { heuristic, scope };
+            for entropy in [Entropy::None, Entropy::Huffman] {
+                v.push(Box::new(Predicted {
+                    options,
+                    block: Some(8),
+                    entropy,
+                }));
+            }
+        }
+    }
+    // Both shapes with a dictionary stage, so the winner is not decided by the entropy coder.
+    for scope in [Scope::SharedRow, Scope::PerChannel] {
+        v.push(Box::new(Predicted {
+            options: PredictOptions {
+                heuristic: Heuristic::Sad,
+                scope,
+            },
             block: Some(8),
             entropy: Entropy::Deflate,
-            zigzag: true,
-        }),
-    ]
+        }));
+    }
+    v
 }
 
 #[cfg(test)]

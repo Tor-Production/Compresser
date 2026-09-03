@@ -1,4 +1,4 @@
-# BRP v2 — Block Range Packing bitstream specification
+# BRP v3 — Block Range Packing bitstream specification
 
 **Status:** normative. The implementation in `crates/brp-core` MUST match this document.
 Golden-byte tests in `crates/brp-core/tests/golden.rs` enforce the match. Any change to this
@@ -10,7 +10,7 @@ BRP is a lossless raster image format. It exploits *local* range coherence: with
 of an image, a channel usually spans far fewer distinct values than its full dynamic range, so
 fewer than `bit_depth` bits per sample are needed.
 
-Encoding happens in two stages.
+Encoding happens in three stages.
 
 **Stage 1, whole-image channel reduction.** Before any blocks are considered, each channel is
 classified:
@@ -21,6 +21,11 @@ classified:
   the bitstream and replaced by a reference. This is what makes a grayscale image stored as RGB
   cost the same as one stored as gray.
 - **coded** — everything else. These are the only channels that reach stage 2.
+
+**Stage 1.5, spatial prediction.** Optional, and recorded in the header. Each row picks one of
+five predictors — the same five PNG defines — shared by every coded channel, and each sample is
+replaced by the *zigzagged* difference from its prediction. Stage 2 then packs those residuals
+instead of the samples.
 
 **Stage 2, block range packing.** The image is divided into a grid of blocks. Within each block,
 each coded channel is packed independently:
@@ -53,24 +58,28 @@ Byte-aligned, at offset 0.
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
 | 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
-| 4      | `version`       | u8   | `2`                                                       |
+| 4      | `version`       | u8   | `3`                                                       |
 | 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
 | 10     | `height`        | u32  | pixels, MUST be > 0                                       |
 | 14     | `channels`      | u8   | 1 = Gray, 2 = Gray+Alpha, 3 = RGB, 4 = RGBA               |
-| 15     | `bit_depth`     | u8   | MUST be 8 in version 2                                    |
+| 15     | `bit_depth`     | u8   | MUST be 8 in version 3                                    |
 | 16     | `block_w`       | u32  | pixels, MUST be > 0                                       |
 | 20     | `block_h`       | u32  | pixels, MUST be > 0                                       |
-| 24     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
-| 25     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
+| 24     | `filter_mode`   | u8   | 0 = no prediction, 1 = adaptive per-row — see section 5   |
+| 25     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
+| 26     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
 | …      | `constants`     | n B  | one byte per CONSTANT channel, ascending channel order    |
 
 The trailing 0x1A in the magic is the same trick PNG uses: it terminates output under `type` on
 DOS-derived shells and turns text-mode mangling into an early mismatch instead of silent
 corruption. The magic carries no version, so the `version` byte is the single source of truth.
 
-Header length is therefore `25 + (1 if any alias) + (number of constant channels)`, between 25 and
-30 bytes. The body bitstream starts at the next byte.
+Header length is therefore `26 + (1 if any alias) + (number of constant channels)`, between 26 and
+31 bytes. The body bitstream starts at the next byte.
+
+`filter_mode` MUST be 0 when no channel is `CODED`: with nothing to predict, prediction has no
+canonical encoding, and allowing both values would make two different files mean the same image.
 
 ### 3.1 `channel_modes`
 
@@ -115,10 +124,48 @@ Blocks at the right and bottom edges are **clipped** to the image bounds. A bloc
 its clipped area, `bw * bh`, which may be smaller than `block_w * block_h`. Clipped blocks are not
 padded and carry no marker — the geometry is fully determined by the header.
 
-## 5. Block body
+## 5. Prediction
+
+When `filter_mode` is 1, the body opens with `height` fields of 3 bits each, one per image row in
+top-to-bottom order, naming that row's predictor:
+
+| Value | Predictor | Prediction |
+|------:|-----------|------------|
+| 0 | None | 0 |
+| 1 | Sub | the sample to the left |
+| 2 | Up | the sample above |
+| 3 | Average | `(left + above) / 2`, rounded down |
+| 4 | Paeth | PNG's Paeth predictor over left, above and upper-left |
+| 5..7 | — | reserved, MUST be rejected |
+
+Neighbours outside the image read as 0, and every neighbour is the sample of the *same channel* at
+that position. The predictor applies to every coded channel of the row alike.
+
+Each sample is then replaced by
+
+```
+residual = zigzag(sample - prediction)        arithmetic modulo 256
+zigzag(v) = (v << 1) ^ (v >> 7)               on the signed interpretation of v
+```
+
+so that `0, -1, 1, -2, 2` map to `0, 1, 2, 3, 4`. **The zigzag is load-bearing, not cosmetic.**
+Without it a residual of -1 is stored as 255, so a block holding residuals of -1 and +1 spans
+0..255 and needs the full eight bits even though every value in it is tiny. Measured, the naive
+composition produces files *larger than the raw samples*; see `docs/EXPERIMENTS.md`.
+
+An encoder chooses each row's predictor freely — the choice affects size, never correctness. The
+reference encoder minimises the sum of absolute residuals over the row, which is PNG's heuristic
+and measured better than minimising the largest residual.
+
+Channels that stage 1 elided are not predicted; they do not appear in the bitstream at all.
+
+## 6. Block body
 
 Let `coded_channels` be the channels whose mode is `CODED`, in ascending channel order. This list
 may be empty, in which case the body is empty and the file is the header alone.
+
+Blocks follow the prediction section, or start the body when `filter_mode` is 0. The samples the
+block packer sees are the residuals from section 5 whenever prediction is on.
 
 For each block, in raster order, the following is written with no alignment between parts:
 
@@ -138,7 +185,7 @@ Headers precede payloads for the whole block (rather than being interleaved per 
 decoder can compute a block's exact payload size before reading it. This enables block skipping and
 parallel decoding in later versions.
 
-### 5.1 Width code
+### 6.1 Width code
 
 ```
 width_code = bit_length(max - min)
@@ -152,39 +199,46 @@ Worked example from the design brief: a block whose channel spans `max - min == 
 
 A decoder MUST reject `width_code > bit_depth`.
 
-## 6. Reconstruction order
+## 7. Reconstruction order
 
 A decoder fills the sample buffer in this order:
 
 1. Constant channels, from `constants`.
-2. Coded channels, from the block stream.
-3. Alias channels, copied from their targets.
+2. Coded channels, from the block stream — residuals, if prediction is on.
+3. Undo prediction, in raster order.
+4. Alias channels, copied from their targets.
 
-Aliases resolve last because their targets are coded channels, which do not exist until step 2.
+Step 3 must run in raster order, because each prediction reads neighbours that the same loop has
+already restored. Aliases resolve last because their targets are coded channels, which do not hold
+final values until step 3.
 
-## 7. Size accounting
+## 8. Size accounting
 
 For one block of `n = bw * bh` pixels over `k = coded_channels.len()` channels:
 
 ```
-header bits  = k * (bit_depth + 4)
-payload bits = n * sum(width_code[c] for c in coded_channels)
+prediction bits = height * 3          (once per file, when filter_mode is 1)
+header bits     = k * (bit_depth + 4)
+payload bits    = n * sum(width_code[c] for c in coded_channels)
 ```
 
 Stage 1 is what makes the header cost disappear for degenerate channels. A solid-colour 4K RGB
 image at 8x8 blocks would otherwise pay `3 * 12` bits across 393216 blocks — 1.7 MB of pure
 overhead — and instead costs 28 bytes in total.
 
-## 8. Decoder validation rules
+## 9. Decoder validation rules
 
 A decoder MUST reject, with an error and never a panic:
 
 - `magic` != `42 52 50 1A`
-- `version` != 2
+- `version` != 3
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
 - any of `width`, `height`, `block_w`, `block_h` == 0
 - reserved flag bits non-zero
+- `filter_mode` above 1
+- `filter_mode` of 1 with no `CODED` channel
+- a filter kind above 4
 - a channel mode of 3
 - `channel_modes` bits set for channels at or above `channels`
 - channel 0 with mode `ALIAS`
@@ -198,7 +252,7 @@ A decoder MUST reject, with an error and never a panic:
 Trailing bytes beyond the last block are ignored, but the padding bits of the final data byte MUST
 be zero and are checked.
 
-**Resource limits.** A header declares its dimensions in 25 bytes, and a well-formed file of
+**Resource limits.** A header declares its dimensions in 26 bytes, and a well-formed file of
 constant channels legitimately decodes to an image of any size at all. The bitstream length
 therefore places no useful bound on the output, and a decoder reading untrusted files MUST impose
 its own limit on the decoded image size and refuse anything above it. This is decoder policy rather
@@ -211,9 +265,10 @@ residual is bounded by `max - min`. A decoder is *not* required to detect it: th
 the innermost loop of the hot path and carries no memory-safety implication, because the sample type
 is already the full width of the bit depth.
 
-## 9. Version history
+## 10. Version history
 
 | Version | Change |
 |--------:|--------|
 | 1 | Initial format: per-block, per-channel base + fixed-width residual packing; constant-alpha elision via a single flag bit. Magic was `BRP1`. |
 | 2 | Version-independent magic. Constant-channel elision generalised from alpha to every channel, and channel aliasing added, both as a whole-image stage before block packing. Replaces the v1 `ALPHA_CONSTANT` flag. |
+| 3 | Optional spatial prediction with zigzagged residuals, selected per row from PNG's five predictors, recorded in a new `filter_mode` header byte. |

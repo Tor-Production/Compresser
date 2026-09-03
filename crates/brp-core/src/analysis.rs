@@ -3,8 +3,9 @@
 use crate::bitio::BitReader;
 use crate::block::{BlockGrid, BlockRect};
 use crate::error::BrpError;
-use crate::header::{Header, WIDTH_CODE_BITS};
+use crate::header::{Header, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
 use crate::image::{required_len, MAX_CHANNELS};
+use crate::predict::{FILTER_KINDS, FILTER_KIND_BITS};
 use crate::Result;
 
 /// One block's coded parameters. Entries are indexed by *slot*, matching
@@ -24,6 +25,10 @@ pub struct Analysis {
     pub header: Header,
     pub file_bytes: usize,
     pub header_bytes: usize,
+    /// Bits spent on the per-row predictor codes, zero when prediction is off.
+    pub filter_bits: u64,
+    /// The predictor chosen for each row, empty when prediction is off.
+    pub filter_kinds: Vec<u8>,
     /// Bits spent on per-block channel headers (base + width code).
     pub block_header_bits: u64,
     /// Bits spent on packed residuals.
@@ -59,11 +64,26 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
     let mut block_header_bits = 0u64;
     let mut payload_bits = 0u64;
     let mut body_bits_used = 0u64;
+    let mut filter_kinds = Vec::new();
+    let mut filter_bits = 0u64;
 
     // An image of nothing but constant and aliased channels has no block stream to walk.
     if !coded.is_empty() {
         let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
         let mut reader = BitReader::new(&bytes[header_len..]);
+
+        // The per-row predictors precede the blocks; skipping them would misalign everything.
+        if header.filter_mode == FILTER_MODE_ADAPTIVE {
+            filter_kinds.reserve(header.height as usize);
+            for _ in 0..header.height {
+                let kind = reader.read(FILTER_KIND_BITS)? as u8;
+                if kind >= FILTER_KINDS {
+                    return Err(BrpError::InvalidFilterKind(kind));
+                }
+                filter_kinds.push(kind);
+            }
+            filter_bits = u64::from(header.height) * u64::from(FILTER_KIND_BITS);
+        }
 
         for rect in grid.iter() {
             let mut info = BlockInfo {
@@ -110,6 +130,8 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
         header,
         file_bytes: bytes.len(),
         header_bytes: header_len,
+        filter_bits,
+        filter_kinds,
         block_header_bits,
         payload_bits,
         padding_bits,
@@ -124,28 +146,61 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
 mod tests {
     use super::*;
     use crate::channels::ChannelMode;
-    use crate::encode::{encode, EncodeOptions};
+    use crate::encode::{encode, EncodeOptions, FilterChoice};
     use crate::image::RawImage;
+
+    /// Analysis tests want the block stream unobscured by prediction, except where they say so.
+    fn plain() -> EncodeOptions {
+        EncodeOptions {
+            filter: FilterChoice::Off,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn accounts_for_every_bit_in_the_file() {
         let src = RawImage::new(8, 8, 3, (0..192u32).map(|v| v as u8).collect()).unwrap();
-        let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+        let bytes = encode(&src, &plain()).unwrap();
         let a = analyze(&bytes).unwrap();
 
         assert_eq!(a.file_bytes, bytes.len());
-        assert_eq!(a.header_bytes, 25);
+        assert_eq!(a.header_bytes, 26);
         assert_eq!(a.raw_bytes, 192);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.trailing_bytes, 0);
 
-        let body_bits = a.block_header_bits + a.payload_bits + a.padding_bits;
+        let body_bits = a.filter_bits + a.block_header_bits + a.payload_bits + a.padding_bits;
         assert_eq!(body_bits % 8, 0);
         assert_eq!(
             a.header_bytes + (body_bits / 8) as usize,
             a.file_bytes,
-            "header + block headers + payload + padding must be the whole file"
+            "header + filters + block headers + payload + padding must be the whole file"
         );
+    }
+
+    /// The same accounting must hold with prediction on, where the filter codes shift everything.
+    #[test]
+    fn accounts_for_every_bit_with_prediction() {
+        let data: Vec<u8> = (0..(16 * 16 * 3))
+            .map(|i| (60 + (i / 3) % 7) as u8)
+            .collect();
+        let src = RawImage::new(16, 16, 3, data).unwrap();
+        let bytes = encode(
+            &src,
+            &EncodeOptions {
+                block_size: Some((4, 4)),
+                filter: FilterChoice::On,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let a = analyze(&bytes).unwrap();
+
+        assert_eq!(a.filter_kinds.len(), 16, "one predictor per row");
+        assert_eq!(a.filter_bits, 16 * 3);
+        let body_bits = a.filter_bits + a.block_header_bits + a.payload_bits + a.padding_bits;
+        assert_eq!(body_bits % 8, 0);
+        assert_eq!(a.header_bytes + (body_bits / 8) as usize, a.file_bytes);
     }
 
     #[test]
@@ -157,8 +212,9 @@ mod tests {
         assert!(a.blocks.is_empty());
         assert_eq!(a.block_header_bits, 0);
         assert_eq!(a.payload_bits, 0);
+        assert_eq!(a.filter_bits, 0, "nothing to predict");
         assert_eq!(a.header.plan.mode(0), ChannelMode::Constant(77));
-        assert_eq!(a.file_bytes, 26);
+        assert_eq!(a.file_bytes, 27);
     }
 
     #[test]
@@ -166,7 +222,7 @@ mod tests {
         // Green aliases red, so the coded channels are 0 and 2 and the histogram must skip 1.
         let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, 255 - v]).collect();
         let src = RawImage::new(4, 4, 3, data).unwrap();
-        let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+        let bytes = encode(&src, &plain()).unwrap();
         let a = analyze(&bytes).unwrap();
 
         assert_eq!(a.header.plan.mode(1), ChannelMode::Alias(0));
@@ -181,6 +237,7 @@ mod tests {
         let src = RawImage::new(10, 6, 1, (0..60u8).collect()).unwrap();
         let opts = EncodeOptions {
             block_size: Some((4, 4)),
+            filter: FilterChoice::Off,
             ..Default::default()
         };
         let bytes = encode(&src, &opts).unwrap();

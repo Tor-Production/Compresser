@@ -1,6 +1,8 @@
 //! Invariant 1 from `docs/ARCHITECTURE.md`: `decode(encode(img)) == img`, byte for byte.
 
-use brp_core::{analyze, decode, encode, ChannelMode, ChannelOptions, EncodeOptions, RawImage};
+use brp_core::{
+    analyze, decode, encode, ChannelMode, ChannelOptions, EncodeOptions, FilterChoice, RawImage,
+};
 
 /// Every block size worth exercising, including ones that do not divide the image evenly.
 const BLOCK_SIZES: &[Option<(u32, u32)>] = &[
@@ -34,22 +36,36 @@ const CHANNEL_OPTIONS: &[ChannelOptions] = &[
     },
 ];
 
+/// Every prediction choice, so a bug in one path cannot hide behind another.
+const FILTERS: &[FilterChoice] = &[FilterChoice::Off, FilterChoice::On, FilterChoice::Auto];
+
 fn assert_round_trips(src: &RawImage) {
     for &block_size in BLOCK_SIZES {
         for &channels in CHANNEL_OPTIONS {
-            let opts = EncodeOptions {
-                block_size,
-                channels,
-            };
-            let bytes = encode(src, &opts).unwrap();
-            let back = decode(&bytes).unwrap();
-            assert_eq!(
-                &back, src,
-                "block_size {block_size:?}, channels {channels:?}"
-            );
-            // Anything that decodes must also analyze, and vice versa.
-            analyze(&bytes).unwrap();
+            for &filter in FILTERS {
+                let opts = EncodeOptions {
+                    block_size,
+                    channels,
+                    filter,
+                };
+                let bytes = encode(src, &opts).unwrap();
+                let back = decode(&bytes).unwrap();
+                assert_eq!(
+                    &back, src,
+                    "block_size {block_size:?}, channels {channels:?}, filter {filter:?}"
+                );
+                // Anything that decodes must also analyze, and vice versa.
+                analyze(&bytes).unwrap();
+            }
         }
+    }
+}
+
+/// Options with prediction off, for tests that reason about the block stream directly.
+fn no_filter() -> EncodeOptions {
+    EncodeOptions {
+        filter: FilterChoice::Off,
+        ..Default::default()
     }
 }
 
@@ -162,6 +178,7 @@ fn constant_alpha_variants() {
                 &EncodeOptions {
                     block_size: Some((3, 3)),
                     channels: ChannelOptions::default(),
+                    filter: FilterChoice::Off,
                 },
             )
             .unwrap();
@@ -173,6 +190,7 @@ fn constant_alpha_variants() {
                         constants: false,
                         aliases: false,
                     },
+                    filter: FilterChoice::Off,
                 },
             )
             .unwrap();
@@ -204,7 +222,7 @@ fn varying_alpha_is_not_elided() {
         |x, y, c| if c == 3 { x as u8 } else { noise(x, y, c) },
     );
     assert_round_trips(&src);
-    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let bytes = encode(&src, &no_filter()).unwrap();
     assert_eq!(
         analyze(&bytes).unwrap().header.plan.mode(3),
         ChannelMode::Coded
@@ -217,7 +235,7 @@ fn varying_alpha_is_not_elided() {
 fn narrow_range_actually_compresses() {
     // Every channel spans 16 values, so 4 bits per sample instead of 8.
     let src = image(64, 64, 3, |x, y, _| 100 + ((x + y) % 16) as u8);
-    let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+    let bytes = encode(&src, &no_filter()).unwrap();
     let raw = src.data().len();
     assert!(
         bytes.len() < raw / 2 + 32,

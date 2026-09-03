@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use brp_core::{
     analyze, decode_with, encode, Analysis, ChannelMode, ChannelOptions, DecodeOptions,
-    EncodeOptions,
+    EncodeOptions, FilterChoice,
 };
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -44,6 +44,29 @@ struct EncodeArgs {
     /// Code every channel per block, even one identical to an earlier channel.
     #[arg(long)]
     no_channel_aliasing: bool,
+    /// How to use spatial prediction: off, on, or try both and keep the smaller file.
+    #[arg(long, value_enum, default_value_t = FilterArg::Auto)]
+    filter: FilterArg,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum FilterArg {
+    /// Never predict. Fastest to encode.
+    Off,
+    /// Always predict.
+    On,
+    /// Encode both ways and keep the smaller file.
+    Auto,
+}
+
+impl From<FilterArg> for FilterChoice {
+    fn from(a: FilterArg) -> Self {
+        match a {
+            FilterArg::Off => FilterChoice::Off,
+            FilterArg::On => FilterChoice::On,
+            FilterArg::Auto => FilterChoice::Auto,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -110,6 +133,7 @@ fn cmd_encode(args: &EncodeArgs) -> Result<()> {
             constants: !args.no_constant_channels,
             aliases: !args.no_channel_aliasing,
         },
+        filter: args.filter.into(),
     };
     let bytes = encode(&loaded.image, &opts).map_err(|e| anyhow::anyhow!(e))?;
     std::fs::write(&args.output, &bytes)
@@ -171,6 +195,14 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     );
     println!("  bit depth      {}", h.bit_depth);
     println!("  block size     {}x{}", h.block_w, h.block_h);
+    println!(
+        "  prediction     {}",
+        if h.filter_mode == brp_core::FILTER_MODE_ADAPTIVE {
+            "adaptive per-row, zigzagged residuals"
+        } else {
+            "off"
+        }
+    );
 
     println!("\nchannel plan (stage 1)");
     for c in 0..usize::from(h.channels) {
@@ -199,6 +231,9 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     println!("  blocks         {blocks:>12}");
     println!("\nwhere the bits went");
     print_bits("file header", header_bits, total_bits);
+    if a.filter_bits > 0 {
+        print_bits("row filters", a.filter_bits, total_bits);
+    }
     print_bits("block headers", a.block_header_bits, total_bits);
     print_bits("payload", a.payload_bits, total_bits);
     print_bits("padding", a.padding_bits, total_bits);
@@ -209,6 +244,21 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     if coded.is_empty() {
         println!("\nNo channel reaches the block stream: this file is a bare header.");
         return;
+    }
+
+    if !a.filter_kinds.is_empty() {
+        println!("\npredictors chosen (rows)");
+        let names = ["none", "sub", "up", "average", "paeth"];
+        for (kind, name) in names.iter().enumerate() {
+            let n = a
+                .filter_kinds
+                .iter()
+                .filter(|&&k| usize::from(k) == kind)
+                .count();
+            if n > 0 {
+                println!("  {name:<10} {n:>8}");
+            }
+        }
     }
 
     println!("\nwidth codes chosen (bits per sample)");

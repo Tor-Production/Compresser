@@ -1,6 +1,6 @@
 //! Property tests for the two invariants that matter most: losslessness, and never panicking.
 
-use brp_core::{analyze, decode, encode, ChannelOptions, EncodeOptions, RawImage};
+use brp_core::{analyze, decode, encode, ChannelOptions, EncodeOptions, FilterChoice, RawImage};
 use proptest::prelude::*;
 
 /// An arbitrary image: dimensions up to 32x32, any channel count, arbitrary samples.
@@ -16,6 +16,14 @@ fn arb_image() -> impl Strategy<Value = RawImage> {
 fn arb_channel_options() -> impl Strategy<Value = ChannelOptions> {
     (any::<bool>(), any::<bool>())
         .prop_map(|(constants, aliases)| ChannelOptions { constants, aliases })
+}
+
+fn arb_filter() -> impl Strategy<Value = FilterChoice> {
+    prop_oneof![
+        Just(FilterChoice::Off),
+        Just(FilterChoice::On),
+        Just(FilterChoice::Auto),
+    ]
 }
 
 /// Block sizes that mostly do not divide the image evenly.
@@ -35,8 +43,9 @@ proptest! {
         src in arb_image(),
         block_size in arb_block_size(),
         channels in arb_channel_options(),
+        filter in arb_filter(),
     ) {
-        let opts = EncodeOptions { block_size, channels };
+        let opts = EncodeOptions { block_size, channels, filter };
         let bytes = encode(&src, &opts).unwrap();
         let back = decode(&bytes).unwrap();
         prop_assert_eq!(back, src);
@@ -44,8 +53,12 @@ proptest! {
 
     /// Encoding is deterministic: the same input and options always give the same bytes.
     #[test]
-    fn encoding_is_deterministic(src in arb_image(), block_size in arb_block_size()) {
-        let opts = EncodeOptions { block_size, channels: ChannelOptions::default() };
+    fn encoding_is_deterministic(
+        src in arb_image(),
+        block_size in arb_block_size(),
+        filter in arb_filter(),
+    ) {
+        let opts = EncodeOptions { block_size, channels: ChannelOptions::default(), filter };
         prop_assert_eq!(encode(&src, &opts).unwrap(), encode(&src, &opts).unwrap());
     }
 
@@ -54,16 +67,32 @@ proptest! {
     fn analysis_accounts_for_the_whole_file(
         src in arb_image(),
         block_size in arb_block_size(),
+        filter in arb_filter(),
     ) {
-        let opts = EncodeOptions { block_size, channels: ChannelOptions::default() };
+        let opts = EncodeOptions { block_size, channels: ChannelOptions::default(), filter };
         let bytes = encode(&src, &opts).unwrap();
         let a = analyze(&bytes).unwrap();
 
-        let body_bits = a.block_header_bits + a.payload_bits + a.padding_bits;
+        let body_bits = a.filter_bits + a.block_header_bits + a.payload_bits + a.padding_bits;
         prop_assert_eq!(body_bits % 8, 0);
         prop_assert_eq!(a.header_bytes + (body_bits / 8) as usize, a.file_bytes);
         prop_assert_eq!(a.trailing_bytes, 0);
         prop_assert_eq!(a.raw_bytes, src.data().len());
+    }
+
+    /// `Auto` is not allowed to be worse than either fixed choice: it encodes both and keeps the
+    /// smaller, so its output length must equal the minimum.
+    #[test]
+    fn auto_is_never_worse(src in arb_image(), block_size in arb_block_size()) {
+        let base = |filter| EncodeOptions {
+            block_size,
+            channels: ChannelOptions::default(),
+            filter,
+        };
+        let off = encode(&src, &base(FilterChoice::Off)).unwrap().len();
+        let on = encode(&src, &base(FilterChoice::On)).unwrap().len();
+        let auto = encode(&src, &base(FilterChoice::Auto)).unwrap().len();
+        prop_assert_eq!(auto, on.min(off));
     }
 
     /// Arbitrary bytes must never panic the decoder, whatever they happen to say.
@@ -89,10 +118,11 @@ proptest! {
         let opts = EncodeOptions {
             block_size: None,
             channels: ChannelOptions { constants: false, aliases: false },
+            filter: FilterChoice::Off,
         };
         let mut bytes = encode(&src, &opts).unwrap();
-        assert_eq!(bytes.len().min(25), 25);
-        bytes.truncate(25);
+        assert_eq!(bytes.len().min(26), 26);
+        bytes.truncate(26);
         bytes.extend_from_slice(&body);
         let _ = decode(&bytes);
         let _ = analyze(&bytes);

@@ -15,7 +15,7 @@ pub enum BrpError {
     #[error("unsupported format version {found}, this build reads version {expected}")]
     UnsupportedVersion { found: u8, expected: u8 },
 
-    #[error("unsupported bit depth {0}, only 8 is defined in version 2")]
+    #[error("unsupported bit depth {0}, only 8 is defined in version 3")]
     UnsupportedBitDepth(u8),
 
     #[error("invalid channel count {0}, expected 1, 2, 3 or 4")]
@@ -26,6 +26,15 @@ pub enum BrpError {
 
     #[error("reserved flag bits set: 0x{0:02x}")]
     ReservedFlagsSet(u8),
+
+    #[error("unsupported filter mode {0}, version 3 defines 0 and 1")]
+    UnsupportedFilterMode(u8),
+
+    #[error("invalid filter kind {0}, must be below 5")]
+    InvalidFilterKind(u8),
+
+    #[error("prediction is enabled but no channel reaches the block stream")]
+    FilterWithoutCodedChannels,
 
     #[error("channel mode 3 is reserved (modes byte names it)")]
     ReservedChannelMode(u8),

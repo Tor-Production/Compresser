@@ -22,6 +22,7 @@ image.rs    RawImage { width, height, channels, data: Vec<u8> }
             Interleaved samples, row-major, no stride padding.
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
 channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
+predict.rs  Stage 1.5 — per-row predictor choice and zigzagged residuals.
 header.rs   Header struct, write_to()/parse(). Byte-aligned, little-endian.
 block.rs    BlockGrid — iterator over clipped block rectangles.
 encode.rs   Stage 2 — scan_block() -> per-channel base/width_code, then emit.
@@ -32,14 +33,19 @@ analysis.rs Walks a bitstream without reconstructing pixels. Backs `brp info`.
 ## Data flow
 
 ```
-encode:  RawImage ──▶ channel plan ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
-decode:  &[u8] ──▶ Header::parse ──▶ constants ──▶ [per block: headers → payloads] ──▶ aliases ──▶ RawImage
+encode:  RawImage ──▶ channel plan ──▶ predict ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
+decode:  &[u8] ──▶ Header::parse ──▶ constants ──▶ [per block: headers → payloads] ──▶ unpredict ──▶ aliases ──▶ RawImage
 ```
 
 Only *coded* channels reach the block grid, and they are not necessarily a prefix of the channel
 list — an RGB image whose green aliases red codes channels 0 and 2. Every loop therefore indexes by
 *slot* into `Header::coded_indices()`, never by raw channel number. Getting this wrong produces a
 codec that works on RGB and silently corrupts RGBA.
+
+The decode order is not a preference: constants, then blocks, then unpredict, then aliases.
+Unprediction must run in raster order because each prediction reads neighbours the same loop has
+already restored, and aliases must come after it because their targets do not hold final values
+until then.
 
 Encode and decode walk the block grid in the same order and read/write the same fields in the same
 sequence. When changing one, change the other in the same commit — the round-trip tests will catch

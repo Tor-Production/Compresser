@@ -22,18 +22,22 @@ one byte for its value replaces the whole channel.
 
 ## Status
 
-Format version 2, and a measurement harness that has already changed the plan.
+Format version 3, and a measurement harness that has twice changed the plan.
 
 **Stage 1** removes whole-image redundancy before any block is considered: a channel whose samples
 are all identical becomes one header byte, and a channel identical to an earlier one becomes a
-reference. A solid colour is a 28-byte header at any resolution; grayscale stored as RGB costs one
+reference. A solid colour is a 29-byte header at any resolution; grayscale stored as RGB costs one
 channel instead of three.
+
+**Stage 1.5** predicts each sample from its neighbours, choosing one of PNG's five predictors per
+row, and stores the *zigzagged* difference. Optional, and on by default via `Auto`, which encodes
+both ways and keeps the smaller file.
 
 **Stage 2** is the block range packing above, at a block size that defaults to the whole image.
 
 ### What the measurements say
 
-`brp-lab` runs twelve-plus pipelines over the corpus, verifies each is lossless, and times both
+`brp-lab` runs a dozen-plus pipelines over both corpora, verifies each is lossless, and times both
 directions. Full tables and reasoning in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
 On six Kodak photographs (6.8 MiB raw):
@@ -41,27 +45,30 @@ On six Kodak photographs (6.8 MiB raw):
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
 | `filter+deflate` — what PNG does | **59.2%** | 9 MiB/s | 103 MiB/s |
-| `filter+zigzag+brp[8x8]+deflate` | 65.6% | 21 MiB/s | 84 MiB/s |
-| `raw+deflate` | 66.9% | 28 MiB/s | 184 MiB/s |
-| `quadtree` | 73.8% | 32 MiB/s | 169 MiB/s |
-| `brp[8x8]` | 77.8% | 195 MiB/s | 209 MiB/s |
-| `brp[whole]` | 100.0% | 194 MiB/s | 186 MiB/s |
+| `brp[8x8]` + Deflate on top | 65.6% | 16 MiB/s | 85 MiB/s |
+| `raw+deflate` | 66.9% | 30 MiB/s | 196 MiB/s |
+| `quadtree` (lab only, not in the format) | 73.8% | 35 MiB/s | 177 MiB/s |
+| **`brp[8x8]`, version 3** | **74.4%** | 36 MiB/s | 122 MiB/s |
+| `brp[8x8]`, version 2 | 77.8% | 209 MiB/s | 235 MiB/s |
+| `brp[whole]` | 100.0% | 188 MiB/s | 200 MiB/s |
 
-Three findings worth stating plainly:
+Four findings worth stating plainly:
 
-- **PNG's spatial prediction beats block range packing on photographs.** BRP's best variant is 6
-  points behind, and plain `brp[8x8]` is 19 behind. Where BRP wins is speed: it decodes twice as
-  fast and encodes twenty times faster.
+- **PNG's spatial prediction beats block range packing on photographs.** Version 3 closed the gap
+  from 19 points to 15 by adopting prediction, but the remaining gap is real. Where BRP wins is
+  speed.
 - **The corpus decides the conclusion.** On synthetic images alone, `brp+deflate` came *first*,
   ahead of PNG's approach. Adding photographs reversed it. Never judge this codec on generated
   images.
 - **Prediction and range packing fight each other unless residuals are zigzagged.** Composing them
   naively produces a file *larger than raw* (102.3%), because a residual of -1 stored as 255 makes
-  a block of tiny residuals span the whole byte range. Interleaving the signs fixes it and is worth
-  28 percentage points.
+  a block of tiny residuals span the whole byte range. Interleaving the signs is worth 28
+  percentage points.
+- **Two plausible improvements measured worse.** Choosing a predictor per channel gains nothing,
+  and optimising the largest residual rather than their sum — which looks right, since the width
+  code is set by the extreme — loses 1.8 points. PNG's choices survived contact with the data.
 
-The roadmap is ordered by those numbers: prediction first, entropy coding second, adaptive block
-size third. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Next is entropy coding of the residuals. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Build and use
 
@@ -71,6 +78,10 @@ cargo build --release
 
 ```bash
 cargo run -p brp-cli --release -- encode input.png output.brp --block-size 16x16
+```
+
+```bash
+cargo run -p brp-cli --release -- encode input.png output.brp --filter off
 ```
 
 ```bash
