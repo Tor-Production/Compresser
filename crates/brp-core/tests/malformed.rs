@@ -2,7 +2,17 @@
 //!
 //! The decoder parses untrusted files. Every byte it reads is hostile until validated.
 
-use brp_core::{analyze, decode, encode, BrpError, EncodeOptions, RawImage};
+use brp_core::{analyze, decode, encode, BrpError, ChannelOptions, EncodeOptions, RawImage};
+
+/// Header length when every channel is coded — no alias byte, no constants.
+const BODY_AT: usize = 25;
+
+/// Stage 1 disabled, so every channel is coded, the header is exactly [`BODY_AT`] bytes, and there
+/// is a real block stream to corrupt.
+const ALL_CODED: ChannelOptions = ChannelOptions {
+    constants: false,
+    aliases: false,
+};
 
 fn sample_file() -> Vec<u8> {
     let data: Vec<u8> = (0..(6 * 5 * 4)).map(|i| (i * 7 % 251) as u8).collect();
@@ -11,15 +21,23 @@ fn sample_file() -> Vec<u8> {
         &src,
         &EncodeOptions {
             block_size: Some((2, 2)),
-            alpha_opt: false,
+            channels: ALL_CODED,
         },
     )
     .unwrap()
 }
 
 #[test]
+fn the_sample_has_the_shape_the_other_tests_assume() {
+    let bytes = sample_file();
+    assert_eq!(bytes[BODY_AT - 1], 0, "all channels coded");
+    assert!(bytes.len() > BODY_AT, "there is a block stream");
+    assert!(decode(&bytes).is_ok());
+}
+
+#[test]
 fn empty_and_tiny_inputs() {
-    for len in 0..24 {
+    for len in 0..BODY_AT {
         let bytes = vec![0u8; len];
         assert!(matches!(
             decode(&bytes).unwrap_err(),
@@ -35,12 +53,22 @@ fn bad_magic() {
     assert_eq!(decode(&bytes).unwrap_err(), BrpError::BadMagic);
 }
 
+/// The v1 magic must not be mistaken for a v2 file.
+#[test]
+fn the_previous_format_generation_is_rejected() {
+    let mut bytes = sample_file();
+    bytes[0..4].copy_from_slice(b"BRP1");
+    assert_eq!(decode(&bytes).unwrap_err(), BrpError::BadMagic);
+}
+
 #[test]
 fn every_truncation_is_rejected() {
     let bytes = sample_file();
     for cut in 0..bytes.len() {
-        let err = decode(&bytes[..cut]);
-        assert!(err.is_err(), "truncating to {cut} bytes must fail");
+        assert!(
+            decode(&bytes[..cut]).is_err(),
+            "truncating to {cut} bytes must fail"
+        );
         // analyze() walks the same structure and must agree.
         assert!(analyze(&bytes[..cut]).is_err(), "analyze at {cut} bytes");
     }
@@ -92,7 +120,6 @@ fn large_declared_geometry_with_empty_body() {
         decode(&bytes).unwrap_err(),
         BrpError::UnexpectedEof | BrpError::InvalidWidthCode(_)
     ));
-    // analyze() never allocates the pixel buffer at all, and must reach the same verdict.
     assert!(matches!(
         analyze(&bytes).unwrap_err(),
         BrpError::UnexpectedEof | BrpError::InvalidWidthCode(_)
@@ -100,8 +127,8 @@ fn large_declared_geometry_with_empty_body() {
 }
 
 /// Regression: a single corrupted byte in `width` used to make the decoder attempt an 85 GB
-/// allocation from a 33-byte file. The claim cannot be refuted from the bitstream length -- an
-/// image of constant blocks legitimately compresses to almost nothing -- so the decoder needs an
+/// allocation from a 33-byte file. The claim cannot be refuted from the bitstream length — an
+/// image of constant channels legitimately is nothing but a header — so the decoder needs an
 /// explicit size limit.
 #[test]
 fn one_corrupt_byte_cannot_demand_an_enormous_allocation() {
@@ -113,27 +140,17 @@ fn one_corrupt_byte_cannot_demand_an_enormous_allocation() {
     ));
 }
 
+/// Version 2 reserves the whole flags byte.
 #[test]
 fn reserved_flag_bits_are_rejected() {
-    for bit in 1..8 {
+    for bit in 0..8 {
         let mut bytes = sample_file();
-        bytes[5] |= 1 << bit;
+        bytes[5] = 1 << bit;
         assert!(matches!(
             decode(&bytes).unwrap_err(),
             BrpError::ReservedFlagsSet(_)
         ));
     }
-}
-
-#[test]
-fn alpha_constant_on_an_opaque_format_is_rejected() {
-    let src = RawImage::new(4, 4, 3, vec![9; 48]).unwrap();
-    let mut bytes = encode(&src, &EncodeOptions::default()).unwrap();
-    bytes[5] = 0b0000_0001;
-    assert_eq!(
-        decode(&bytes).unwrap_err(),
-        BrpError::AlphaConstantWithoutAlpha(3)
-    );
 }
 
 #[test]
@@ -148,17 +165,92 @@ fn zero_block_size_in_a_header_is_rejected() {
     }
 }
 
-/// Sweeps the whole byte range through the first body byte, which carries a base and part of a
+/// Every possible `channel_modes` byte, against every channel count. Some are valid, most are not;
+/// none may panic, and decode and analyze must always agree.
+#[test]
+fn arbitrary_channel_modes() {
+    for channels in 1..=4u8 {
+        let n = usize::from(channels);
+        let data: Vec<u8> = (0..(4 * 4 * n)).map(|i| (i * 11 % 251) as u8).collect();
+        let src = RawImage::new(4, 4, channels, data).unwrap();
+        let original = encode(
+            &src,
+            &EncodeOptions {
+                block_size: Some((2, 2)),
+                channels: ALL_CODED,
+            },
+        )
+        .unwrap();
+
+        for modes in 0..=255u8 {
+            let mut bytes = original.clone();
+            bytes[24] = modes;
+            let decoded = decode(&bytes);
+            let analyzed = analyze(&bytes);
+            assert_eq!(
+                decoded.is_ok(),
+                analyzed.is_ok(),
+                "decode and analyze disagree: {channels} channels, modes {modes:#04x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn alias_validation() {
+    // Grayscale in RGB, so channels 1 and 2 both alias channel 0.
+    let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, v]).collect();
+    let src = RawImage::new(4, 4, 3, data).unwrap();
+    let original = encode(&src, &EncodeOptions::default()).unwrap();
+    assert_eq!(original[24], 0x28, "R coded, G alias, B alias");
+    assert!(decode(&original).is_ok());
+
+    // Channel 1 pointing at itself is a forward reference.
+    let mut bytes = original.clone();
+    bytes[25] = 0b01;
+    assert_eq!(
+        decode(&bytes).unwrap_err(),
+        BrpError::InvalidAliasTarget {
+            channel: 1,
+            target: 1
+        }
+    );
+
+    // Channel 2 pointing at channel 1, which is itself an alias: a chain.
+    let mut bytes = original.clone();
+    bytes[25] = 0b01_00;
+    assert_eq!(
+        decode(&bytes).unwrap_err(),
+        BrpError::AliasTargetNotCoded {
+            channel: 2,
+            target: 1
+        }
+    );
+
+    // Bits beyond the two aliases present must be clear.
+    let mut bytes = original.clone();
+    bytes[25] = 0b0001_0000;
+    assert_eq!(
+        decode(&bytes).unwrap_err(),
+        BrpError::AliasTargetBitsSet(0b0001_0000)
+    );
+
+    // Channel 0 can never alias.
+    let mut bytes = original.clone();
+    bytes[24] = 0b00_00_00_10;
+    assert_eq!(decode(&bytes).unwrap_err(), BrpError::AliasOnFirstChannel);
+}
+
+/// Sweeps the whole byte range through the first two body bytes, which carry a base and part of a
 /// width code. Some values are valid, some are not; none may panic.
 #[test]
 fn arbitrary_block_headers() {
     let original = sample_file();
-    let body = 24;
     for a in 0..=255u8 {
         for b in 0..=255u8 {
             let mut bytes = original.clone();
-            bytes[body] = a;
-            bytes[body + 1] = b;
+            bytes[BODY_AT] = a;
+            bytes[BODY_AT + 1] = b;
             let _ = decode(&bytes);
             let _ = analyze(&bytes);
         }

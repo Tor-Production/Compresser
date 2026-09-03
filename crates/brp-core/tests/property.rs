@@ -1,6 +1,6 @@
 //! Property tests for the two invariants that matter most: losslessness, and never panicking.
 
-use brp_core::{analyze, decode, encode, EncodeOptions, RawImage};
+use brp_core::{analyze, decode, encode, ChannelOptions, EncodeOptions, RawImage};
 use proptest::prelude::*;
 
 /// An arbitrary image: dimensions up to 32x32, any channel count, arbitrary samples.
@@ -10,6 +10,12 @@ fn arb_image() -> impl Strategy<Value = RawImage> {
         prop::collection::vec(any::<u8>(), len)
             .prop_map(move |data| RawImage::new(w, h, ch, data).unwrap())
     })
+}
+
+/// Every combination of the two stage-1 reductions.
+fn arb_channel_options() -> impl Strategy<Value = ChannelOptions> {
+    (any::<bool>(), any::<bool>())
+        .prop_map(|(constants, aliases)| ChannelOptions { constants, aliases })
 }
 
 /// Block sizes that mostly do not divide the image evenly.
@@ -28,9 +34,9 @@ proptest! {
     fn round_trip_is_lossless(
         src in arb_image(),
         block_size in arb_block_size(),
-        alpha_opt in any::<bool>(),
+        channels in arb_channel_options(),
     ) {
-        let opts = EncodeOptions { block_size, alpha_opt };
+        let opts = EncodeOptions { block_size, channels };
         let bytes = encode(&src, &opts).unwrap();
         let back = decode(&bytes).unwrap();
         prop_assert_eq!(back, src);
@@ -39,7 +45,7 @@ proptest! {
     /// Encoding is deterministic: the same input and options always give the same bytes.
     #[test]
     fn encoding_is_deterministic(src in arb_image(), block_size in arb_block_size()) {
-        let opts = EncodeOptions { block_size, alpha_opt: true };
+        let opts = EncodeOptions { block_size, channels: ChannelOptions::default() };
         prop_assert_eq!(encode(&src, &opts).unwrap(), encode(&src, &opts).unwrap());
     }
 
@@ -49,7 +55,7 @@ proptest! {
         src in arb_image(),
         block_size in arb_block_size(),
     ) {
-        let opts = EncodeOptions { block_size, alpha_opt: true };
+        let opts = EncodeOptions { block_size, channels: ChannelOptions::default() };
         let bytes = encode(&src, &opts).unwrap();
         let a = analyze(&bytes).unwrap();
 
@@ -75,9 +81,18 @@ proptest! {
         h in 1u32..=16,
         ch in 1u8..=4,
     ) {
-        let src = RawImage::new(w, h, ch, vec![0; (w * h * u32::from(ch)) as usize]).unwrap();
-        let mut bytes = encode(&src, &EncodeOptions::default()).unwrap();
-        bytes.truncate(24);
+        // Varying samples with stage 1 off, so the header is exactly 25 bytes and the arbitrary
+        // body lands on the block loop rather than on a truncated channel section.
+        let len = (w * h * u32::from(ch)) as usize;
+        let samples: Vec<u8> = (0..len).map(|i| (i * 37 % 251) as u8).collect();
+        let src = RawImage::new(w, h, ch, samples).unwrap();
+        let opts = EncodeOptions {
+            block_size: None,
+            channels: ChannelOptions { constants: false, aliases: false },
+        };
+        let mut bytes = encode(&src, &opts).unwrap();
+        assert_eq!(bytes.len().min(25), 25);
+        bytes.truncate(25);
         bytes.extend_from_slice(&body);
         let _ = decode(&bytes);
         let _ = analyze(&bytes);

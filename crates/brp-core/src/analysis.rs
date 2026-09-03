@@ -7,7 +7,8 @@ use crate::header::{Header, WIDTH_CODE_BITS};
 use crate::image::{required_len, MAX_CHANNELS};
 use crate::Result;
 
-/// One block's coded parameters.
+/// One block's coded parameters. Entries are indexed by *slot*, matching
+/// [`Header::coded_indices`], not by image channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
     pub rect: BlockRect,
@@ -31,7 +32,7 @@ pub struct Analysis {
     pub padding_bits: u64,
     /// Bytes past the end of the bitstream, if any.
     pub trailing_bytes: usize,
-    /// `histogram[channel][width_code]` — how often each width was chosen.
+    /// `histogram[image channel][width_code]` — how often each width was chosen.
     pub width_code_histogram: [[u64; 9]; MAX_CHANNELS],
     pub blocks: Vec<BlockInfo>,
     /// Raw size of the image these bits reconstruct.
@@ -50,50 +51,54 @@ impl Analysis {
 /// Applies the same validation as [`crate::decode`], so a file that analyzes cleanly also decodes.
 pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
     let (header, header_len) = Header::parse(bytes)?;
-    let coded = header.coded_channels();
+    let coded = header.coded_indices();
     let raw_bytes = required_len(header.width, header.height, header.channels)?;
-
-    let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
-    let mut reader = BitReader::new(&bytes[header_len..]);
 
     let mut blocks = Vec::new();
     let mut histogram = [[0u64; 9]; MAX_CHANNELS];
     let mut block_header_bits = 0u64;
     let mut payload_bits = 0u64;
+    let mut body_bits_used = 0u64;
 
-    for rect in grid.iter() {
-        let mut info = BlockInfo {
-            rect,
-            bases: [0; MAX_CHANNELS],
-            width_codes: [0; MAX_CHANNELS],
-            coded: coded as u8,
-        };
+    // An image of nothing but constant and aliased channels has no block stream to walk.
+    if !coded.is_empty() {
+        let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
+        let mut reader = BitReader::new(&bytes[header_len..]);
 
-        for (c, channel_hist) in histogram.iter_mut().enumerate().take(coded) {
-            info.bases[c] = reader.read(u32::from(header.bit_depth))? as u8;
-            let width_code = reader.read(WIDTH_CODE_BITS)? as u8;
-            if width_code > header.bit_depth {
-                return Err(BrpError::InvalidWidthCode(width_code));
+        for rect in grid.iter() {
+            let mut info = BlockInfo {
+                rect,
+                bases: [0; MAX_CHANNELS],
+                width_codes: [0; MAX_CHANNELS],
+                coded: coded.len() as u8,
+            };
+
+            for slot in 0..coded.len() {
+                info.bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
+                let width_code = reader.read(WIDTH_CODE_BITS)? as u8;
+                if width_code > header.bit_depth {
+                    return Err(BrpError::InvalidWidthCode(width_code));
+                }
+                info.width_codes[slot] = width_code;
+                histogram[coded.channel(slot)][usize::from(width_code)] += 1;
             }
-            info.width_codes[c] = width_code;
-            channel_hist[usize::from(width_code)] += 1;
-        }
-        block_header_bits +=
-            coded as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
+            block_header_bits +=
+                coded.len() as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
 
-        let pixels = rect.pixel_count();
-        for c in 0..coded {
-            let bits = pixels * u64::from(info.width_codes[c]);
-            reader.skip(bits)?;
-            payload_bits += bits;
+            let pixels = rect.pixel_count();
+            for slot in 0..coded.len() {
+                let bits = pixels * u64::from(info.width_codes[slot]);
+                reader.skip(bits)?;
+                payload_bits += bits;
+            }
+
+            blocks.push(info);
         }
 
-        blocks.push(info);
+        reader.verify_padding()?;
+        body_bits_used = reader.bit_pos() as u64;
     }
 
-    reader.verify_padding()?;
-
-    let body_bits_used = reader.bit_pos() as u64;
     let padding_bits = (8 - (body_bits_used % 8)) % 8;
     let body_bytes_used = body_bits_used.div_ceil(8) as usize;
     let trailing_bytes = bytes
@@ -118,6 +123,7 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::ChannelMode;
     use crate::encode::{encode, EncodeOptions};
     use crate::image::RawImage;
 
@@ -128,7 +134,7 @@ mod tests {
         let a = analyze(&bytes).unwrap();
 
         assert_eq!(a.file_bytes, bytes.len());
-        assert_eq!(a.header_bytes, 24);
+        assert_eq!(a.header_bytes, 25);
         assert_eq!(a.raw_bytes, 192);
         assert_eq!(a.blocks.len(), 1);
         assert_eq!(a.trailing_bytes, 0);
@@ -143,14 +149,31 @@ mod tests {
     }
 
     #[test]
-    fn histogram_counts_constant_channels_as_zero_width() {
+    fn a_constant_channel_never_reaches_the_block_stream() {
         let src = RawImage::new(4, 4, 1, vec![77; 16]).unwrap();
         let bytes = encode(&src, &EncodeOptions::default()).unwrap();
         let a = analyze(&bytes).unwrap();
 
-        assert_eq!(a.width_code_histogram[0][0], 1);
+        assert!(a.blocks.is_empty());
+        assert_eq!(a.block_header_bits, 0);
         assert_eq!(a.payload_bits, 0);
-        assert_eq!(a.blocks[0].bases[0], 77);
+        assert_eq!(a.header.plan.mode(0), ChannelMode::Constant(77));
+        assert_eq!(a.file_bytes, 26);
+    }
+
+    #[test]
+    fn histogram_is_indexed_by_image_channel() {
+        // Green aliases red, so the coded channels are 0 and 2 and the histogram must skip 1.
+        let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, 255 - v]).collect();
+        let src = RawImage::new(4, 4, 3, data).unwrap();
+        let bytes = encode(&src, &EncodeOptions::default()).unwrap();
+        let a = analyze(&bytes).unwrap();
+
+        assert_eq!(a.header.plan.mode(1), ChannelMode::Alias(0));
+        let counted: u64 = a.width_code_histogram[1].iter().sum();
+        assert_eq!(counted, 0, "an aliased channel contributes no width codes");
+        assert!(a.width_code_histogram[0].iter().sum::<u64>() > 0);
+        assert!(a.width_code_histogram[2].iter().sum::<u64>() > 0);
     }
 
     #[test]

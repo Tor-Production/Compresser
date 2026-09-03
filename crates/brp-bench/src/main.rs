@@ -75,7 +75,7 @@ fn measure(path: &Path) -> Result<Row> {
     for &block in BLOCK_SIZES {
         let opts = EncodeOptions {
             block_size: block.map(|n| (n, n)),
-            alpha_opt: true,
+            ..Default::default()
         };
         let bytes = encode(&img, &opts).map_err(|e| anyhow::anyhow!(e))?;
         verify_lossless(&img, &bytes, path, block)?;

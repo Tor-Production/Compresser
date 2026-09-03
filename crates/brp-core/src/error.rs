@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Every way a BRP bitstream or an API call can be invalid.
 ///
-/// One variant per validation rule in `docs/FORMAT.md` section 7. The decoder returns these; it
+/// One variant per validation rule in `docs/FORMAT.md` section 8. The decoder returns these; it
 /// never panics on malformed input.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BrpError {
@@ -15,7 +15,7 @@ pub enum BrpError {
     #[error("unsupported format version {found}, this build reads version {expected}")]
     UnsupportedVersion { found: u8, expected: u8 },
 
-    #[error("unsupported bit depth {0}, only 8 is defined in version 1")]
+    #[error("unsupported bit depth {0}, only 8 is defined in version 2")]
     UnsupportedBitDepth(u8),
 
     #[error("invalid channel count {0}, expected 1, 2, 3 or 4")]
@@ -27,8 +27,23 @@ pub enum BrpError {
     #[error("reserved flag bits set: 0x{0:02x}")]
     ReservedFlagsSet(u8),
 
-    #[error("ALPHA_CONSTANT is set but the image has no alpha channel ({0} channels)")]
-    AlphaConstantWithoutAlpha(u8),
+    #[error("channel mode 3 is reserved (modes byte names it)")]
+    ReservedChannelMode(u8),
+
+    #[error("channel_modes 0x{0:02x} sets bits for channels the image does not have")]
+    ChannelModeBitsSet(u8),
+
+    #[error("channel 0 cannot alias: there is no earlier channel")]
+    AliasOnFirstChannel,
+
+    #[error("channel {channel} aliases channel {target}, which is not an earlier channel")]
+    InvalidAliasTarget { channel: u8, target: u8 },
+
+    #[error("channel {channel} aliases channel {target}, which is not itself coded")]
+    AliasTargetNotCoded { channel: u8, target: u8 },
+
+    #[error("alias_targets 0x{0:02x} sets bits beyond the aliasing channels present")]
+    AliasTargetBitsSet(u8),
 
     #[error("image dimensions overflow the address space")]
     DimensionOverflow,

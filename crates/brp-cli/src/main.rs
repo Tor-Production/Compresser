@@ -2,7 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use brp_core::{
-    analyze, decode_with, encode, Analysis, DecodeOptions, EncodeOptions, MAX_CHANNELS,
+    analyze, decode_with, encode, Analysis, ChannelMode, ChannelOptions, DecodeOptions,
+    EncodeOptions,
 };
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -37,9 +38,12 @@ struct EncodeArgs {
     /// Block size as WxH, or a single number for a square. Defaults to the whole image.
     #[arg(long, value_name = "WxH", value_parser = parse_block_size)]
     block_size: Option<(u32, u32)>,
-    /// Keep the alpha channel in every block even when it is constant.
+    /// Code every channel per block, even one whose samples are all identical.
     #[arg(long)]
-    no_alpha_opt: bool,
+    no_constant_channels: bool,
+    /// Code every channel per block, even one identical to an earlier channel.
+    #[arg(long)]
+    no_channel_aliasing: bool,
 }
 
 #[derive(Args)]
@@ -102,7 +106,10 @@ fn cmd_encode(args: &EncodeArgs) -> Result<()> {
 
     let opts = EncodeOptions {
         block_size: args.block_size,
-        alpha_opt: !args.no_alpha_opt,
+        channels: ChannelOptions {
+            constants: !args.no_constant_channels,
+            aliases: !args.no_channel_aliasing,
+        },
     };
     let bytes = encode(&loaded.image, &opts).map_err(|e| anyhow::anyhow!(e))?;
     std::fs::write(&args.output, &bytes)
@@ -152,9 +159,10 @@ fn cmd_info(args: &InfoArgs) -> Result<()> {
 fn print_info(a: &Analysis, list_blocks: usize) {
     let h = &a.header;
     let blocks = a.blocks.len();
+    let coded = h.coded_indices();
 
     println!("header");
-    println!("  version        1");
+    println!("  version        {}", brp_core::VERSION);
     println!("  dimensions     {}x{}", h.width, h.height);
     println!(
         "  channels       {} ({})",
@@ -163,10 +171,20 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     );
     println!("  bit depth      {}", h.bit_depth);
     println!("  block size     {}x{}", h.block_w, h.block_h);
-    match h.alpha_const {
-        Some(v) => println!("  alpha          constant {v}, channel elided"),
-        None if h.has_alpha() => println!("  alpha          coded per block"),
-        None => println!("  alpha          none"),
+
+    println!("\nchannel plan (stage 1)");
+    for c in 0..usize::from(h.channels) {
+        let label = channel_label(h.channels, c);
+        match h.plan.mode(c) {
+            ChannelMode::Coded => println!("  {c}  {label:<6} coded"),
+            ChannelMode::Constant(v) => {
+                println!("  {c}  {label:<6} constant {v}, elided from the bitstream")
+            }
+            ChannelMode::Alias(t) => println!(
+                "  {c}  {label:<6} identical to channel {t} ({}), elided",
+                channel_label(h.channels, usize::from(t))
+            ),
+        }
     }
 
     let total_bits = a.file_bytes as u64 * 8;
@@ -188,14 +206,19 @@ fn print_info(a: &Analysis, list_blocks: usize) {
         println!("  {} trailing bytes ignored", a.trailing_bytes);
     }
 
+    if coded.is_empty() {
+        println!("\nNo channel reaches the block stream: this file is a bare header.");
+        return;
+    }
+
     println!("\nwidth codes chosen (bits per sample)");
-    let coded = h.coded_channels();
     print!("  {:<10}", "channel");
     for code in 0..=8 {
         print!("{code:>7}");
     }
     println!();
-    for c in 0..coded.min(MAX_CHANNELS) {
+    for slot in 0..coded.len() {
+        let c = coded.channel(slot);
         print!("  {:<10}", channel_label(h.channels, c));
         for code in 0..=8usize {
             let n = a.width_code_histogram[c][code];
@@ -210,7 +233,7 @@ fn print_info(a: &Analysis, list_blocks: usize) {
 
     if list_blocks > 0 && blocks > 0 {
         let shown = list_blocks.min(blocks);
-        println!("\nfirst {shown} of {blocks} block(s)");
+        println!("\nfirst {shown} of {blocks} block(s), coded channels only");
         println!(
             "  {:>6} {:>6} {:>6} {:>6}   {:<24} {:<20}",
             "x", "y", "w", "h", "base", "bits/sample"

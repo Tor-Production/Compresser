@@ -6,10 +6,16 @@ Read this file first. It is the shortest path to being useful in this repository
 
 BRP (Block Range Packing) is a **lossless image codec and file format**, written from scratch.
 
-The core idea: split the image into blocks; per block, per channel, store the channel's minimum as
-a *base* and the bit width needed for `max - min`, then pack every sample as `sample - base` using
-exactly that many bits. A constant channel costs zero payload bits. A fully constant alpha channel
-is dropped from the file entirely and replaced by one header flag plus its value.
+Encoding has two stages.
+
+**Stage 1, whole-image channel reduction.** Each channel is classified as *constant* (every sample
+identical, so the value moves to the header and the channel leaves the bitstream), an *alias* of an
+earlier channel (identical samples, so a grayscale image stored as RGB costs one channel), or
+*coded*.
+
+**Stage 2, block range packing.** Split the image into blocks; per block, per coded channel, store
+the minimum as a *base* and the bit width needed for `max - min`, then pack every sample as
+`sample - base` using exactly that many bits. A block-constant channel costs zero payload bits.
 
 ## Where truth lives
 
@@ -27,7 +33,8 @@ is dropped from the file entirely and replaced by one header flag plus its value
 1. **Never change the bitstream without a version bump and an ADR.** Golden tests in
    `crates/brp-core/tests/golden.rs` will fail; do not "fix" them by regenerating the expected
    bytes unless you are deliberately versioning the format.
-2. **Encode and decode change together**, in the same commit.
+2. **Encode and decode change together**, in the same commit. So does `analysis.rs`, which walks
+   the same structure and must accept exactly the files the decoder accepts — a test asserts it.
 3. **`brp-core` must not gain an image-format dependency.** The `image` crate belongs to
    `brp-imageio` alone; `brp-cli` and `brp-bench` go through that. Keeping PNG and WebP out of the
    core is what keeps the `wasm32` and C-ABI targets on the roadmap reachable.
@@ -39,6 +46,11 @@ is dropped from the file entirely and replaced by one header flag plus its value
    `DecodeOptions::max_image_bytes`.
 6. **Bit order is MSB-first** and is decided in exactly one place: `bitio.rs`. Do not reimplement
    bit packing elsewhere.
+7. **Coded channels are not a prefix.** An RGB image whose green aliases red codes channels 0 and
+   2. Index by *slot* into `Header::coded_indices()`, never by raw channel number.
+8. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
+   to measure candidates; a pipeline earns its way into `FORMAT.md` by winning on the corpus, and
+   then only with a version bump and an ADR.
 
 ## Commands
 
@@ -52,10 +64,13 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Iteration 1. Block size defaults to the whole image; it is already a parameter, so a block-size
-sweep works today. **Compression at whole-image block size is expected to be poor on photographs**
-— the global min/max span nearly the full range, so the width code lands on 8 and nothing is
-saved. That is inherent to the current algorithm, not a bug to report. Gains appear at 8x8/16x16.
+Format version 2. Block size defaults to the whole image; it is already a parameter, so a
+block-size sweep works today.
 
-Not yet implemented, and out of scope until the roadmap says otherwise: entropy coding, predictors,
-inter-block delta, bit depths other than 8, parallel decode.
+**Compression at whole-image block size is expected to be poor on photographs** — the global
+min/max span nearly the full range, so the width code lands on 8 and nothing is saved. That is
+inherent to stage 2, not a bug to report. Gains appear at 8x8/16x16, and stage 1 handles the
+degenerate images regardless of block size.
+
+Not in the format, and not to be added without measurements from `brp-lab`: entropy coding,
+predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode.

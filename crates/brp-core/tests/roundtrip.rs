@@ -1,6 +1,6 @@
 //! Invariant 1 from `docs/ARCHITECTURE.md`: `decode(encode(img)) == img`, byte for byte.
 
-use brp_core::{analyze, decode, encode, EncodeOptions, RawImage};
+use brp_core::{analyze, decode, encode, ChannelMode, ChannelOptions, EncodeOptions, RawImage};
 
 /// Every block size worth exercising, including ones that do not divide the image evenly.
 const BLOCK_SIZES: &[Option<(u32, u32)>] = &[
@@ -14,18 +14,38 @@ const BLOCK_SIZES: &[Option<(u32, u32)>] = &[
     Some((1000, 1000)),
 ];
 
+/// Every combination of the stage-1 reductions, so a bug in one cannot hide behind the other.
+const CHANNEL_OPTIONS: &[ChannelOptions] = &[
+    ChannelOptions {
+        constants: true,
+        aliases: true,
+    },
+    ChannelOptions {
+        constants: true,
+        aliases: false,
+    },
+    ChannelOptions {
+        constants: false,
+        aliases: true,
+    },
+    ChannelOptions {
+        constants: false,
+        aliases: false,
+    },
+];
+
 fn assert_round_trips(src: &RawImage) {
     for &block_size in BLOCK_SIZES {
-        for alpha_opt in [true, false] {
+        for &channels in CHANNEL_OPTIONS {
             let opts = EncodeOptions {
                 block_size,
-                alpha_opt,
+                channels,
             };
             let bytes = encode(src, &opts).unwrap();
             let back = decode(&bytes).unwrap();
             assert_eq!(
                 &back, src,
-                "block_size {block_size:?}, alpha_opt {alpha_opt}"
+                "block_size {block_size:?}, channels {channels:?}"
             );
             // Anything that decodes must also analyze, and vice versa.
             analyze(&bytes).unwrap();
@@ -136,12 +156,12 @@ fn constant_alpha_variants() {
             );
             assert_round_trips(&src);
 
-            // With the optimization on, the flag must actually fire and shrink the file.
+            // With the reduction on, the channel must actually be elided and the file shrink.
             let on = encode(
                 &src,
                 &EncodeOptions {
                     block_size: Some((3, 3)),
-                    alpha_opt: true,
+                    channels: ChannelOptions::default(),
                 },
             )
             .unwrap();
@@ -149,18 +169,28 @@ fn constant_alpha_variants() {
                 &src,
                 &EncodeOptions {
                     block_size: Some((3, 3)),
-                    alpha_opt: false,
+                    channels: ChannelOptions {
+                        constants: false,
+                        aliases: false,
+                    },
                 },
             )
             .unwrap();
             assert!(
                 on.len() < off.len(),
-                "alpha optimization should shrink the file for constant alpha {alpha}"
+                "constant-channel elision should shrink the file for constant alpha {alpha}"
             );
             assert_eq!(decode(&on).unwrap(), src);
             assert_eq!(decode(&off).unwrap(), src);
-            assert_eq!(analyze(&on).unwrap().header.alpha_const, Some(alpha));
-            assert_eq!(analyze(&off).unwrap().header.alpha_const, None);
+            let last = usize::from(ch) - 1;
+            assert_eq!(
+                analyze(&on).unwrap().header.plan.mode(last),
+                ChannelMode::Constant(alpha)
+            );
+            assert_eq!(
+                analyze(&off).unwrap().header.plan.mode(last),
+                ChannelMode::Coded
+            );
         }
     }
 }
@@ -175,7 +205,10 @@ fn varying_alpha_is_not_elided() {
     );
     assert_round_trips(&src);
     let bytes = encode(&src, &EncodeOptions::default()).unwrap();
-    assert_eq!(analyze(&bytes).unwrap().header.alpha_const, None);
+    assert_eq!(
+        analyze(&bytes).unwrap().header.plan.mode(3),
+        ChannelMode::Coded
+    );
 }
 
 /// A narrow-range image is where the algorithm is supposed to win. Guards against a regression

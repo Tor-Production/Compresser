@@ -2,47 +2,24 @@
 
 use crate::bitio::BitWriter;
 use crate::block::{BlockGrid, BlockRect};
+use crate::channels::{self, ChannelOptions};
 use crate::error::BrpError;
 use crate::header::{Header, BIT_DEPTH, HEADER_BASE_SIZE, WIDTH_CODE_BITS};
 use crate::image::{RawImage, MAX_CHANNELS};
 use crate::Result;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncodeOptions {
     /// Block size in pixels. `None` means one block covering the whole image.
     pub block_size: Option<(u32, u32)>,
-    /// Drop the alpha channel when every sample is identical, storing the value in the header.
-    pub alpha_opt: bool,
-}
-
-impl Default for EncodeOptions {
-    fn default() -> Self {
-        Self {
-            block_size: None,
-            alpha_opt: true,
-        }
-    }
+    /// Which whole-image channel reductions to apply in stage 1.
+    pub channels: ChannelOptions,
 }
 
 /// Bits needed to represent `v`. Zero for zero, so a constant block costs no payload.
 #[inline]
 pub(crate) fn bit_length(v: u8) -> u8 {
     (u8::BITS - v.leading_zeros()) as u8
-}
-
-/// Minimum and maximum of one channel across a whole image.
-#[inline]
-fn scan_plane(data: &[u8], channel: usize, stride: usize) -> (u8, u8) {
-    let mut min = u8::MAX;
-    let mut max = u8::MIN;
-    let mut i = channel;
-    while i < data.len() {
-        let v = data[i];
-        min = min.min(v);
-        max = max.max(v);
-        i += stride;
-    }
-    (min, max)
 }
 
 /// Minimum and maximum of one channel within one block.
@@ -76,7 +53,7 @@ pub(crate) fn sample_index(img_w: u32, stride: usize, x: u32, y: u32, channel: u
     (y as usize * img_w as usize + x as usize) * stride + channel
 }
 
-/// Encodes an image into a BRP v1 bitstream.
+/// Encodes an image into a BRP v2 bitstream.
 pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let (block_w, block_h) = opts.block_size.unwrap_or((img.width(), img.height()));
     if block_w == 0 {
@@ -89,13 +66,9 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     let stride = usize::from(img.channels());
     let data = img.data();
 
-    // A constant alpha channel is dropped from every block and recorded once in the header.
-    let alpha_const = if opts.alpha_opt && img.has_alpha() {
-        let (min, max) = scan_plane(data, stride - 1, stride);
-        (min == max).then_some(min)
-    } else {
-        None
-    };
+    // Stage 1: classify channels across the whole image.
+    let plan = channels::plan(data, img.channels(), &opts.channels);
+    let coded = plan.coded_indices();
 
     let header = Header {
         width: img.width(),
@@ -104,40 +77,46 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
         bit_depth: BIT_DEPTH,
         block_w,
         block_h,
-        alpha_const,
+        plan,
     };
-    let coded = header.coded_channels();
 
-    let mut out = Vec::with_capacity(HEADER_BASE_SIZE + 1 + data.len());
+    let mut out = Vec::with_capacity(HEADER_BASE_SIZE + MAX_CHANNELS + data.len());
     header.write_to(&mut out);
 
+    // An image of nothing but constant and aliased channels has no block stream at all.
+    if coded.is_empty() {
+        return Ok(out);
+    }
+
+    // Stage 2: block range packing over the coded channels.
     let grid = BlockGrid::new(img.width(), img.height(), block_w, block_h);
     let mut writer = BitWriter::with_capacity(data.len());
     let mut bases = [0u8; MAX_CHANNELS];
     let mut widths = [0u8; MAX_CHANNELS];
 
     for rect in grid.iter() {
-        for c in 0..coded {
-            let (min, max) = scan_block(data, img.width(), stride, &rect, c);
-            bases[c] = min;
-            widths[c] = bit_length(max - min);
+        for slot in 0..coded.len() {
+            let (min, max) = scan_block(data, img.width(), stride, &rect, coded.channel(slot));
+            bases[slot] = min;
+            widths[slot] = bit_length(max - min);
         }
 
         // Part 1: every channel's header, so a decoder can size the payload before reading it.
-        for c in 0..coded {
-            writer.write(u32::from(bases[c]), u32::from(BIT_DEPTH));
-            writer.write(u32::from(widths[c]), WIDTH_CODE_BITS);
+        for slot in 0..coded.len() {
+            writer.write(u32::from(bases[slot]), u32::from(BIT_DEPTH));
+            writer.write(u32::from(widths[slot]), WIDTH_CODE_BITS);
         }
 
         // Part 2: the payloads, planar.
-        for c in 0..coded {
-            let nbits = u32::from(widths[c]);
+        for slot in 0..coded.len() {
+            let nbits = u32::from(widths[slot]);
             if nbits == 0 {
-                continue; // constant channel: the base alone reconstructs it
+                continue; // constant within this block: the base alone reconstructs it
             }
-            let base = bases[c];
+            let base = bases[slot];
+            let channel = coded.channel(slot);
             for row in 0..rect.h {
-                let mut i = sample_index(img.width(), stride, rect.x, rect.y + row, c);
+                let mut i = sample_index(img.width(), stride, rect.x, rect.y + row, channel);
                 for _ in 0..rect.w {
                     writer.write(u32::from(data[i] - base), nbits);
                     i += stride;
@@ -153,6 +132,7 @@ pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::scan_plane;
 
     #[test]
     fn bit_length_matches_the_spec() {
@@ -212,5 +192,20 @@ mod tests {
             encode(&img, &opts).unwrap_err(),
             BrpError::ZeroDimension { what: "block_w" }
         );
+    }
+
+    /// A solid colour reduces to a bare header, whatever the image size or block size.
+    #[test]
+    fn a_solid_colour_is_header_only() {
+        let img = RawImage::new(256, 256, 3, [7u8, 8, 9].repeat(256 * 256)).unwrap();
+        for block in [None, Some((8, 8)), Some((4, 4))] {
+            let opts = EncodeOptions {
+                block_size: block,
+                ..Default::default()
+            };
+            let bytes = encode(&img, &opts).unwrap();
+            // 24 fixed bytes + modes byte + three constants.
+            assert_eq!(bytes.len(), 28, "block {block:?}");
+        }
     }
 }

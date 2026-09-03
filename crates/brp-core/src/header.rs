@@ -1,23 +1,29 @@
 //! The byte-aligned file header. See `docs/FORMAT.md` section 3.
 
+use crate::channels::{ChannelPlan, CodedIndices};
 use crate::error::BrpError;
 use crate::image::required_len;
 use crate::Result;
 
-pub const MAGIC: [u8; 4] = *b"BRP1";
-pub const VERSION: u8 = 1;
+/// ASCII `BRP` followed by 0x1A. The trailing byte is PNG's trick: it stops `type` on DOS-derived
+/// shells and turns text-mode mangling into a magic mismatch rather than silent corruption.
+///
+/// Version-independent by design — the `version` byte is the single source of truth. See ADR 0004.
+pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
-/// The only bit depth version 1 defines.
+pub const VERSION: u8 = 2;
+
+/// The only bit depth version 2 defines.
 pub const BIT_DEPTH: u8 = 8;
 
 /// Width of the `width_code` field. Four bits, because the code ranges over `0..=8`.
 pub const WIDTH_CODE_BITS: u32 = 4;
 
-/// Header length without the optional `alpha_const` byte.
-pub const HEADER_BASE_SIZE: usize = 24;
+/// Header length up to and including `channel_modes`, before aliases and constants.
+pub const HEADER_BASE_SIZE: usize = 25;
 
-pub const FLAG_ALPHA_CONSTANT: u8 = 0b0000_0001;
-const FLAG_RESERVED_MASK: u8 = !FLAG_ALPHA_CONSTANT;
+/// Offset of the channel section within the header.
+const CHANNEL_SECTION_AT: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -27,19 +33,23 @@ pub struct Header {
     pub bit_depth: u8,
     pub block_w: u32,
     pub block_h: u32,
-    /// `Some(v)` when the alpha channel was elided because every sample equals `v`.
-    pub alpha_const: Option<u8>,
+    pub plan: ChannelPlan,
 }
 
 impl Header {
     /// Serialized length of this header, in bytes.
     pub fn byte_len(&self) -> usize {
-        HEADER_BASE_SIZE + usize::from(self.alpha_const.is_some())
+        CHANNEL_SECTION_AT + self.plan.byte_len()
     }
 
-    /// Channels actually present in the block stream: all of them, minus an elided alpha.
+    /// Channels that appear in the block stream. May be zero.
     pub fn coded_channels(&self) -> usize {
-        usize::from(self.channels) - usize::from(self.alpha_const.is_some())
+        self.plan.coded_count()
+    }
+
+    /// Ascending indices of the coded channels.
+    pub fn coded_indices(&self) -> CodedIndices {
+        self.plan.coded_indices()
     }
 
     pub fn has_alpha(&self) -> bool {
@@ -47,28 +57,21 @@ impl Header {
     }
 
     pub fn write_to(&self, out: &mut Vec<u8>) {
-        let flags = if self.alpha_const.is_some() {
-            FLAG_ALPHA_CONSTANT
-        } else {
-            0
-        };
         out.extend_from_slice(&MAGIC);
         out.push(VERSION);
-        out.push(flags);
+        out.push(0); // flags: all reserved in version 2
         out.extend_from_slice(&self.width.to_le_bytes());
         out.extend_from_slice(&self.height.to_le_bytes());
         out.push(self.channels);
         out.push(self.bit_depth);
         out.extend_from_slice(&self.block_w.to_le_bytes());
         out.extend_from_slice(&self.block_h.to_le_bytes());
-        if let Some(a) = self.alpha_const {
-            out.push(a);
-        }
+        self.plan.write_to(out);
     }
 
     /// Parses and fully validates a header, returning it with the number of bytes consumed.
     ///
-    /// Every rule in `docs/FORMAT.md` section 7 that concerns the header is enforced here, so the
+    /// Every rule in `docs/FORMAT.md` section 8 that concerns the header is enforced here, so the
     /// rest of the decoder can trust these fields.
     pub fn parse(bytes: &[u8]) -> Result<(Self, usize)> {
         if bytes.len() < HEADER_BASE_SIZE {
@@ -88,8 +91,8 @@ impl Header {
             });
         }
         let flags = bytes[5];
-        if flags & FLAG_RESERVED_MASK != 0 {
-            return Err(BrpError::ReservedFlagsSet(flags & FLAG_RESERVED_MASK));
+        if flags != 0 {
+            return Err(BrpError::ReservedFlagsSet(flags));
         }
 
         let width = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
@@ -118,25 +121,7 @@ impl Header {
         // Rejects images that could not be addressed even if the bitstream were complete.
         required_len(width, height, channels)?;
 
-        let alpha_constant = flags & FLAG_ALPHA_CONSTANT != 0;
-        let has_alpha = matches!(channels, 2 | 4);
-        if alpha_constant && !has_alpha {
-            return Err(BrpError::AlphaConstantWithoutAlpha(channels));
-        }
-
-        let mut consumed = HEADER_BASE_SIZE;
-        let alpha_const = if alpha_constant {
-            let a = *bytes
-                .get(HEADER_BASE_SIZE)
-                .ok_or(BrpError::HeaderTooShort {
-                    got: bytes.len(),
-                    need: HEADER_BASE_SIZE + 1,
-                })?;
-            consumed += 1;
-            Some(a)
-        } else {
-            None
-        };
+        let (plan, plan_len) = ChannelPlan::parse(&bytes[CHANNEL_SECTION_AT..], channels)?;
 
         Ok((
             Self {
@@ -146,9 +131,9 @@ impl Header {
                 bit_depth,
                 block_w,
                 block_h,
-                alpha_const,
+                plan,
             },
-            consumed,
+            CHANNEL_SECTION_AT + plan_len,
         ))
     }
 }
@@ -156,6 +141,7 @@ impl Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::{ChannelMode, ChannelOptions};
 
     fn sample() -> Header {
         Header {
@@ -165,7 +151,7 @@ mod tests {
             bit_depth: BIT_DEPTH,
             block_w: 640,
             block_h: 480,
-            alpha_const: None,
+            plan: ChannelPlan::all_coded(4),
         }
     }
 
@@ -176,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_without_alpha_const() {
+    fn round_trips_an_all_coded_header() {
         let h = sample();
         let bytes = encoded(&h);
         assert_eq!(bytes.len(), HEADER_BASE_SIZE);
@@ -186,24 +172,33 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_with_alpha_const() {
+    fn round_trips_constants_and_aliases() {
+        // Grayscale carried in RGBA, fully opaque: G and B alias R, alpha is constant.
+        let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, v, 255]).collect();
+        let plan = crate::channels::plan(&data, 4, &ChannelOptions::default());
         let h = Header {
-            alpha_const: Some(255),
+            width: 4,
+            height: 4,
+            channels: 4,
+            plan,
             ..sample()
         };
         let bytes = encoded(&h);
-        assert_eq!(bytes.len(), HEADER_BASE_SIZE + 1);
+        // modes byte + alias byte + one constant.
+        assert_eq!(bytes.len(), HEADER_BASE_SIZE + 2);
+
         let (parsed, used) = Header::parse(&bytes).unwrap();
         assert_eq!(parsed, h);
-        assert_eq!(used, HEADER_BASE_SIZE + 1);
-        assert_eq!(parsed.coded_channels(), 3);
+        assert_eq!(used, bytes.len());
+        assert_eq!(parsed.coded_channels(), 1);
+        assert_eq!(parsed.plan.mode(3), ChannelMode::Constant(255));
     }
 
     #[test]
     fn field_offsets_match_the_spec() {
         let bytes = encoded(&sample());
-        assert_eq!(&bytes[0..4], b"BRP1");
-        assert_eq!(bytes[4], 1); // version
+        assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
+        assert_eq!(bytes[4], 2); // version
         assert_eq!(bytes[5], 0); // flags
         assert_eq!(&bytes[6..10], &640u32.to_le_bytes());
         assert_eq!(&bytes[10..14], &480u32.to_le_bytes());
@@ -211,47 +206,36 @@ mod tests {
         assert_eq!(bytes[15], 8); // bit depth
         assert_eq!(&bytes[16..20], &640u32.to_le_bytes());
         assert_eq!(&bytes[20..24], &480u32.to_le_bytes());
+        assert_eq!(bytes[24], 0); // channel modes: all coded
     }
 
     #[test]
     fn rejects_bad_magic_and_version() {
         let mut bytes = encoded(&sample());
-        bytes[0] = b'X';
+        bytes[3] = b'1'; // the v1 magic
         assert_eq!(Header::parse(&bytes).unwrap_err(), BrpError::BadMagic);
 
         let mut bytes = encoded(&sample());
-        bytes[4] = 2;
+        bytes[4] = 1;
         assert_eq!(
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedVersion {
-                found: 2,
-                expected: 1
+                found: 1,
+                expected: 2
             }
         );
     }
 
     #[test]
     fn rejects_reserved_flag_bits() {
-        let mut bytes = encoded(&sample());
-        bytes[5] = 0b0000_0010;
-        assert_eq!(
-            Header::parse(&bytes).unwrap_err(),
-            BrpError::ReservedFlagsSet(0b0000_0010)
-        );
-    }
-
-    #[test]
-    fn rejects_alpha_constant_without_alpha() {
-        let mut bytes = encoded(&Header {
-            channels: 3,
-            ..sample()
-        });
-        bytes[5] = FLAG_ALPHA_CONSTANT;
-        bytes.push(255);
-        assert_eq!(
-            Header::parse(&bytes).unwrap_err(),
-            BrpError::AlphaConstantWithoutAlpha(3)
-        );
+        for bit in 0..8 {
+            let mut bytes = encoded(&sample());
+            bytes[5] = 1 << bit;
+            assert!(matches!(
+                Header::parse(&bytes).unwrap_err(),
+                BrpError::ReservedFlagsSet(_)
+            ));
+        }
     }
 
     #[test]
@@ -295,14 +279,6 @@ mod tests {
         assert!(matches!(
             Header::parse(&bytes[..HEADER_BASE_SIZE - 1]).unwrap_err(),
             BrpError::HeaderTooShort { .. }
-        ));
-
-        // ALPHA_CONSTANT promised a byte that is not there.
-        let mut bytes = encoded(&sample());
-        bytes[5] = FLAG_ALPHA_CONSTANT;
-        assert!(matches!(
-            Header::parse(&bytes).unwrap_err(),
-            BrpError::HeaderTooShort { need: 25, .. }
         ));
     }
 

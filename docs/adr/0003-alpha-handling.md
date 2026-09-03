@@ -1,6 +1,8 @@
 # ADR 0003 — Constant alpha elision
 
-**Status:** accepted (2026-09-03)
+**Status:** superseded by [ADR 0005](0005-whole-image-channel-reduction.md) (2026-09-03).
+The decision below was right and is now a special case of the general rule: alpha is simply the
+last channel, and the constant test applies to every channel alike.
 
 ## Context
 

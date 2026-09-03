@@ -63,7 +63,7 @@ fn bench_encode(c: &mut Criterion) {
         for &block in BLOCKS {
             let opts = EncodeOptions {
                 block_size: block.map(|n| (n, n)),
-                alpha_opt: true,
+                ..Default::default()
             };
             group.bench_with_input(BenchmarkId::new(name, label(block)), &opts, |b, opts| {
                 b.iter(|| encode(black_box(&img), black_box(opts)).unwrap())
@@ -80,7 +80,7 @@ fn bench_decode(c: &mut Criterion) {
         for &block in BLOCKS {
             let opts = EncodeOptions {
                 block_size: block.map(|n| (n, n)),
-                alpha_opt: true,
+                ..Default::default()
             };
             let bytes = encode(&img, &opts).unwrap();
             group.bench_with_input(BenchmarkId::new(name, label(block)), &bytes, |b, bytes| {

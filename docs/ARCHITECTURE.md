@@ -17,22 +17,29 @@ larger than the format it implements.
 
 ```
 lib.rs      Public API: encode(), decode(), EncodeOptions. Re-exports.
-error.rs    BrpError — one typed error per validation rule in FORMAT.md §7.
+error.rs    BrpError — one typed error per validation rule in FORMAT.md §8.
 image.rs    RawImage { width, height, channels, data: Vec<u8> }
             Interleaved samples, row-major, no stride padding.
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
-header.rs   Header struct, Flags, write_to()/parse(). Byte-aligned, little-endian.
+channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
+header.rs   Header struct, write_to()/parse(). Byte-aligned, little-endian.
 block.rs    BlockGrid — iterator over clipped block rectangles.
-encode.rs   scan_min_max() -> per-channel base/width_code, then emit.
+encode.rs   Stage 2 — scan_block() -> per-channel base/width_code, then emit.
 decode.rs   Mirror of encode.rs.
+analysis.rs Walks a bitstream without reconstructing pixels. Backs `brp info`.
 ```
 
 ## Data flow
 
 ```
-encode:  RawImage ──▶ alpha scan ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
-decode:  &[u8] ──▶ Header::parse ──▶ [per block: headers → payloads → scatter] ──▶ RawImage
+encode:  RawImage ──▶ channel plan ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
+decode:  &[u8] ──▶ Header::parse ──▶ constants ──▶ [per block: headers → payloads] ──▶ aliases ──▶ RawImage
 ```
+
+Only *coded* channels reach the block grid, and they are not necessarily a prefix of the channel
+list — an RGB image whose green aliases red codes channels 0 and 2. Every loop therefore indexes by
+*slot* into `Header::coded_indices()`, never by raw channel number. Getting this wrong produces a
+codec that works on RGB and silently corrupts RGBA.
 
 Encode and decode walk the block grid in the same order and read/write the same fields in the same
 sequence. When changing one, change the other in the same commit — the round-trip tests will catch

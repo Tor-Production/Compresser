@@ -1,8 +1,8 @@
 //! Generates a synthetic sample corpus.
 //!
-//! These images are chosen to bracket the algorithm's behaviour rather than to be representative
-//! of real photography: a solid colour is the best case, full-range noise is the worst, and the
-//! rest sit between. Drop real photographs into `samples/` alongside them for meaningful numbers.
+//! These images bracket the algorithm's behaviour rather than being representative of real
+//! photography: a solid colour is the best case, full-range noise is the worst, and the rest sit
+//! between. For real photographs run `fetch-photos` as well.
 //!
 //! Usage: `cargo run -p brp-bench --bin gen-samples -- samples/`
 
@@ -20,14 +20,32 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
     let images: Vec<(&str, RawImage)> = vec![
+        // --- degenerate cases: stage 1 should collapse these to almost nothing ---
         ("flat-rgb", build(3, |_, _, c| [200, 40, 90][c as usize])),
-        ("gradient-rgb", build(3, gradient)),
+        (
+            "flat-rgba",
+            build(4, |_, _, c| [18, 52, 86, 255][c as usize]),
+        ),
+        ("gray-as-rgb", build(3, |x, y, _| photo_like(x, y, 0))),
+        (
+            "gray-as-rgba",
+            build(4, |x, y, c| if c == 3 { 255 } else { photo_like(x, y, 0) }),
+        ),
+        // --- low local variation: the case the block packer is built for ---
+        ("monotone-blue", build(3, monotone_blue)),
+        ("smooth-lowcontrast", build(3, smooth_lowcontrast)),
         ("narrow-rgb", build(3, narrow_band)),
-        ("noise-rgb", build(3, noise)),
-        ("photo-like", build(3, photo_like)),
-        ("screenshot-like", build(3, screenshot_like)),
+        ("gradient-rgb", build(3, gradient)),
         ("gray-gradient", build(1, gradient)),
+        // --- structured content ---
+        ("text-page", build(3, text_page)),
+        ("text-page-gray", build(1, text_page)),
+        ("screenshot-like", build(3, screenshot_like)),
+        ("photo-like", build(3, photo_like)),
+        // --- worst cases ---
+        ("noise-rgb", build(3, noise)),
         ("gray-noise", build(1, noise)),
+        // --- alpha behaviour ---
         (
             "rgba-opaque",
             build(4, |x, y, c| if c == 3 { 255 } else { photo_like(x, y, c) }),
@@ -98,17 +116,64 @@ fn narrow_band(x: u32, y: u32, c: u8) -> u8 {
     100 + ((x / 3 + y / 5 + u32::from(c) * 4) % 16) as u8
 }
 
-/// Overlapping smooth blobs with a little high-frequency detail: closer to a photograph, where
-/// neighbouring pixels correlate but the global range is wide.
-fn photo_like(x: u32, y: u32, c: u8) -> u8 {
+/// A single hue at varying luminance: the channels move together but are never equal, so aliasing
+/// cannot fire and the block packer has to earn the saving on its own.
+fn monotone_blue(x: u32, y: u32, c: u8) -> u8 {
+    let l = ((x / 2 + y / 3) % 96) as u8;
+    match c {
+        0 => 20 + l / 4,
+        1 => 40 + l / 2,
+        _ => 120 + l,
+    }
+}
+
+/// Neighbouring pixels differ by at most a couple of levels, but the image spans the full range.
+/// This is the shape real photographs have, exaggerated.
+fn smooth_lowcontrast(x: u32, y: u32, c: u8) -> u8 {
     let fx = x as f32 / SIZE as f32;
     let fy = y as f32 / SIZE as f32;
-    let phase = c as f32 * 1.7;
-    let smooth = (fx * 6.0 + phase).sin() * (fy * 4.0 - phase).cos();
-    let vignette = 1.0 - ((fx - 0.5).powi(2) + (fy - 0.5).powi(2)) * 1.2;
-    let grain = (noise(x, y, c) as f32 - 128.0) / 32.0;
-    let v = 128.0 + smooth * 70.0 + vignette * 30.0 + grain;
+    let v = 128.0
+        + 60.0 * (fx * 2.0 + f32::from(c) * 0.4).sin()
+        + 50.0 * (fy * 2.0).cos()
+        + 2.0 * ((x / 8 + y / 8) % 3) as f32;
     v.clamp(0.0, 255.0) as u8
+}
+
+/// A page of text: a white sheet, a margin, and rows of dark glyph-shaped runs. Mostly flat with
+/// sparse hard edges, which is where per-block ranges do well and entropy coding does better.
+fn text_page(x: u32, y: u32, c: u8) -> u8 {
+    let paper = [252u8, 251, 247][c as usize];
+    let ink = [24u8, 22, 28][c as usize];
+
+    let margin = 24;
+    if x < margin || x >= SIZE - margin || y < margin || y >= SIZE - margin {
+        return paper;
+    }
+
+    let line_pitch = 14;
+    let row = (y - margin) / line_pitch;
+    let within = (y - margin) % line_pitch;
+    // Glyph bodies occupy the upper part of each line; the rest is leading.
+    if within >= 9 {
+        return paper;
+    }
+
+    // Word runs of pseudo-random length, separated by spaces.
+    let col = x - margin;
+    let word = col / 7;
+    let seed = noise(word, row, 0);
+    if seed.is_multiple_of(5) {
+        return paper; // inter-word space
+    }
+    // Ragged right edge: the last line of each paragraph stops early.
+    if row % 7 == 6 && col > 120 {
+        return paper;
+    }
+    // Strokes rather than solid bars, so the ink is not one flat rectangle.
+    if (col + u32::from(seed)).is_multiple_of(3) && within < 2 {
+        return paper;
+    }
+    ink
 }
 
 /// Large flat panels, hard edges and repeating stripes: the synthetic-graphics case, where whole
@@ -125,4 +190,17 @@ fn screenshot_like(x: u32, y: u32, c: u8) -> u8 {
     } else {
         background
     }
+}
+
+/// Overlapping smooth blobs with a little high-frequency detail: closer to a photograph, where
+/// neighbouring pixels correlate but the global range is wide.
+fn photo_like(x: u32, y: u32, c: u8) -> u8 {
+    let fx = x as f32 / SIZE as f32;
+    let fy = y as f32 / SIZE as f32;
+    let phase = c as f32 * 1.7;
+    let smooth = (fx * 6.0 + phase).sin() * (fy * 4.0 - phase).cos();
+    let vignette = 1.0 - ((fx - 0.5).powi(2) + (fy - 0.5).powi(2)) * 1.2;
+    let grain = (noise(x, y, c) as f32 - 128.0) / 32.0;
+    let v = 128.0 + smooth * 70.0 + vignette * 30.0 + grain;
+    v.clamp(0.0, 255.0) as u8
 }
