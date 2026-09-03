@@ -1,0 +1,61 @@
+# Architecture
+
+## Crate layout
+
+| Crate | Role | Notable constraint |
+|---|---|---|
+| `brp-core` | The codec: bit I/O, header, block geometry, encode, decode. | No image-format dependencies. `#![forbid(unsafe_code)]`. Must stay `wasm32`-clean and C-ABI-wrappable. |
+| `brp-cli` | `encode` / `decode` / `info` commands. | Owns all PNG/WebP I/O via the `image` crate. |
+| `brp-bench` | Compression-ratio table against PNG and WebP across block sizes. | Verifies losslessness on real images as a side effect. |
+
+`brp-core` deliberately does not depend on `image`. Pulling a PNG decoder into the codec would
+block the WASM and embedded targets on the roadmap, and would make the core's dependency surface
+larger than the format it implements.
+
+## Module map (`brp-core`)
+
+```
+lib.rs      Public API: encode(), decode(), EncodeOptions. Re-exports.
+error.rs    BrpError — one typed error per validation rule in FORMAT.md §7.
+image.rs    RawImage { width, height, channels, data: Vec<u8> }
+            Interleaved samples, row-major, no stride padding.
+bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
+header.rs   Header struct, Flags, write_to()/parse(). Byte-aligned, little-endian.
+block.rs    BlockGrid — iterator over clipped block rectangles.
+encode.rs   scan_min_max() -> per-channel base/width_code, then emit.
+decode.rs   Mirror of encode.rs.
+```
+
+## Data flow
+
+```
+encode:  RawImage ──▶ alpha scan ──▶ Header ──▶ [per block: scan → headers → payloads] ──▶ Vec<u8>
+decode:  &[u8] ──▶ Header::parse ──▶ [per block: headers → payloads → scatter] ──▶ RawImage
+```
+
+Encode and decode walk the block grid in the same order and read/write the same fields in the same
+sequence. When changing one, change the other in the same commit — the round-trip tests will catch
+a mismatch, but the golden tests are what catch a *silent* format drift where both sides agree with
+each other but no longer agree with `FORMAT.md`.
+
+## Invariants
+
+These hold for every commit. Breaking one is a bug, not a trade-off:
+
+1. **Losslessness.** `decode(encode(img)) == img`, byte for byte, for every input.
+2. **No panics on untrusted input.** Every malformed byte sequence yields `Err(BrpError)`.
+   Indexing, slicing and arithmetic on header-derived values must be checked.
+3. **No unbounded allocation from header fields.** A 24-byte header can declare a 16-exapixel
+   image, and the bitstream length cannot refute it, because constant blocks legitimately compress
+   to almost nothing. `decode` therefore checks `DecodeOptions::max_image_bytes` before sizing the
+   pixel buffer and uses `try_reserve_exact` so that even a raised limit errors rather than aborts.
+   Any future allocation sized from file contents needs the same treatment.
+4. **No `unsafe`** in `brp-core`.
+5. **The spec is the source of truth.** Code follows `docs/FORMAT.md`, never the reverse.
+
+## Performance notes
+
+The hot loops are `scan_min_max` (a reduction, auto-vectorizes well) and the bit pack/unpack loops
+(shift/mask through a `u64` accumulator). Both are ALU- and bandwidth-bound with almost no
+branching. Measure with `cargo bench -p brp-core` before optimizing; `unsafe` fast paths require a
+criterion regression showing the win and an ADR.
