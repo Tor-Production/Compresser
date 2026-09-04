@@ -127,6 +127,31 @@ Notably, `quadtree+deflate` (56.6%) is *worse* than `brp[8x8]+deflate` on the sy
 that stage of testing: the split flags and irregular leaf sizes give Deflate less repetition to
 find. Adaptation and entropy coding partly cancel.
 
+#### Where a quadtree's bits actually go
+
+Measured later with `quadtree-shape` on the eight photographs. Taking `kodim01`, whose quadtree
+file is 932 KiB:
+
+| | Bytes | Of file |
+|---|---:|---:|
+| Split flags, all 28 933 nodes | 3 467 | 0.36% |
+| Base + width code, one per leaf per channel | 97 650 | **10.2%** |
+
+The tree structure is not the cost, and neither is its encoding. 21 700 leaves averaging 18 pixels
+each pay a base and a width code every time; a fixed 8x8 grid over the same image pays 27 648 bytes
+for those same fields, 3.5 times less. Eliding the split flag on nodes too small to split — which
+both sides derive from the geometry — recovers 0.01% across the corpus. The elision is implemented
+because it is free and makes the baseline honest, not because it matters.
+
+The reason it matters so little is worth keeping: a real tree is sparse at the bottom. The cost
+model stops splitting where splitting stops paying, so the deepest levels hold far fewer nodes than
+a full tree would, and the levels near the root that are always split hold almost none by
+construction — 341 nodes above the shallowest leaf, out of 28 933.
+
+This is also why Rice closed the question rather than adaptive partitioning. Both attack the same
+thing, heterogeneity inside a block, and Rice does it with one four-bit field per block instead of
+a base and a width per leaf. Against today's default the quadtree now loses 71.5% to 60.7%.
+
 ### 5. LZW alone is not competitive
 
 `raw+lzw` at 80.9% against `raw+deflate` at 56.0%. Both are dictionary coders over the same bytes;

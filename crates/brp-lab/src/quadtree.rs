@@ -12,6 +12,7 @@
 //! u32 LE  height
 //! u8      channels
 //! u8      minimum leaf dimension
+//! u8      1 if the split flag is omitted on nodes too small to split, 0 if always written
 //! ...     channel plan, as in FORMAT.md section 3.1
 //! bits    the tree: 1 bit per node (1 = split), leaves carrying base + width code + payload
 //! ```
@@ -115,6 +116,7 @@ fn build(
     coded: &CodedIndices,
     rect: BlockRect,
     min_leaf: u32,
+    skip_forced: bool,
 ) -> (Node, u64) {
     let mut bases = [0u8; MAX_CHANNELS];
     let mut widths = [0u8; MAX_CHANNELS];
@@ -125,7 +127,9 @@ fn build(
         widths[slot] = bit_length(max - min);
         payload += rect.pixel_count() * u64::from(widths[slot]);
     }
-    let leaf_bits = 1 + coded.len() as u64 * LEAF_CHANNEL_BITS + payload;
+    // A node that cannot split carries no flag under `skip_forced`: both sides know its size.
+    let flag_bits = u64::from(can_split(rect, min_leaf) || !skip_forced);
+    let leaf_bits = flag_bits + coded.len() as u64 * LEAF_CHANNEL_BITS + payload;
     let leaf = Node::Leaf {
         rect,
         bases,
@@ -139,7 +143,7 @@ fn build(
     let mut kids = Vec::with_capacity(4);
     let mut split_bits = 1u64;
     for child in children_of(rect) {
-        let (node, bits) = build(data, img_w, stride, coded, child, min_leaf);
+        let (node, bits) = build(data, img_w, stride, coded, child, min_leaf, skip_forced);
         split_bits += bits;
         kids.push(node);
     }
@@ -152,12 +156,15 @@ fn build(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_node(
     node: &Node,
     data: &[u8],
     img_w: u32,
     stride: usize,
     coded: &CodedIndices,
+    min_leaf: u32,
+    skip_forced: bool,
     w: &mut BitWriter,
 ) {
     match node {
@@ -166,7 +173,9 @@ fn write_node(
             bases,
             widths,
         } => {
-            w.write(0, 1);
+            if can_split(*rect, min_leaf) || !skip_forced {
+                w.write(0, 1);
+            }
             for slot in 0..coded.len() {
                 w.write(u32::from(bases[slot]), BIT_DEPTH);
                 w.write(u32::from(widths[slot]), WIDTH_CODE_BITS);
@@ -190,14 +199,82 @@ fn write_node(
         Node::Split(kids) => {
             w.write(1, 1);
             for k in kids {
-                write_node(k, data, img_w, stride, coded, w);
+                write_node(k, data, img_w, stride, coded, min_leaf, skip_forced, w);
             }
         }
     }
 }
 
+/// What a built tree is made of. Counts nodes rather than guessing from a full tree: the cost
+/// model stops splitting where splitting does not pay, so real trees are sparse at the bottom and
+/// the textbook "three quarters of the nodes are leaves" does not hold.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TreeStats {
+    pub nodes: u64,
+    pub leaves: u64,
+    /// Leaves too small to split, whose flag is derivable rather than transmitted.
+    pub forced_leaves: u64,
+    pub deepest: u32,
+    /// Depth of the shallowest leaf. Every level above it is split everywhere, so its flags are
+    /// derivable from one header field — which is only worth something if this is large.
+    pub shallowest: u32,
+    /// Base and width-code fields, over every leaf and coded channel.
+    pub leaf_header_bits: u64,
+}
+
+fn walk(node: &Node, min_leaf: u32, coded: usize, depth: u32, out: &mut TreeStats) {
+    out.nodes += 1;
+    out.deepest = out.deepest.max(depth);
+    match node {
+        Node::Leaf { rect, .. } => {
+            out.leaves += 1;
+            out.shallowest = out.shallowest.min(depth);
+            out.leaf_header_bits += coded as u64 * LEAF_CHANNEL_BITS;
+            if !can_split(*rect, min_leaf) {
+                out.forced_leaves += 1;
+            }
+        }
+        Node::Split(kids) => {
+            for k in kids {
+                walk(k, min_leaf, coded, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// Builds the tree an encode would build, and reports its shape instead of its bytes.
+pub fn tree_stats(img: &RawImage, min_leaf: u32) -> TreeStats {
+    let stride = usize::from(img.channels());
+    let data = img.data();
+    let plan = plan_channels(data, img.channels(), &ChannelOptions::default());
+    let coded = plan.coded_indices();
+    let mut stats = TreeStats {
+        shallowest: u32::MAX,
+        ..Default::default()
+    };
+    if coded.is_empty() {
+        return stats;
+    }
+    let root = BlockRect {
+        x: 0,
+        y: 0,
+        w: img.width(),
+        h: img.height(),
+    };
+    let (tree, _) = build(data, img.width(), stride, &coded, root, min_leaf, true);
+    walk(&tree, min_leaf, coded.len(), 0, &mut stats);
+    stats
+}
+
 /// Encodes an image as a quadtree of range-packed leaves.
 pub fn encode(img: &RawImage, min_leaf: u32) -> Vec<u8> {
+    encode_with(img, min_leaf, true)
+}
+
+/// As [`encode`], with the split-flag elision switchable so the two can be measured against each
+/// other. `skip_forced` omits the flag on any node too small to split, which both sides derive
+/// from the geometry and the declared minimum leaf.
+pub fn encode_with(img: &RawImage, min_leaf: u32, skip_forced: bool) -> Vec<u8> {
     let stride = usize::from(img.channels());
     let data = img.data();
     let plan = plan_channels(data, img.channels(), &ChannelOptions::default());
@@ -208,6 +285,7 @@ pub fn encode(img: &RawImage, min_leaf: u32) -> Vec<u8> {
     out.extend_from_slice(&img.height().to_le_bytes());
     out.push(img.channels());
     out.push(min_leaf.clamp(1, 255) as u8);
+    out.push(u8::from(skip_forced));
     plan.write_to(&mut out);
 
     if coded.is_empty() {
@@ -220,10 +298,27 @@ pub fn encode(img: &RawImage, min_leaf: u32) -> Vec<u8> {
         w: img.width(),
         h: img.height(),
     };
-    let (tree, _) = build(data, img.width(), stride, &coded, root, min_leaf);
+    let (tree, _) = build(
+        data,
+        img.width(),
+        stride,
+        &coded,
+        root,
+        min_leaf,
+        skip_forced,
+    );
 
     let mut w = BitWriter::with_capacity(data.len());
-    write_node(&tree, data, img.width(), stride, &coded, &mut w);
+    write_node(
+        &tree,
+        data,
+        img.width(),
+        stride,
+        &coded,
+        min_leaf,
+        skip_forced,
+        &mut w,
+    );
     out.extend_from_slice(&w.finish());
     out
 }
@@ -237,18 +332,33 @@ fn read_node(
     coded: &CodedIndices,
     rect: BlockRect,
     min_leaf: u32,
+    skip_forced: bool,
     depth: u32,
 ) -> Result<()> {
     if depth > 64 {
         bail!("quadtree is deeper than any image geometry allows");
     }
-    let split = r.read(1).map_err(|e| anyhow::anyhow!(e))? == 1;
+    let split = if skip_forced && !can_split(rect, min_leaf) {
+        false
+    } else {
+        r.read(1).map_err(|e| anyhow::anyhow!(e))? == 1
+    };
     if split {
         if !can_split(rect, min_leaf) {
             bail!("quadtree splits a node that cannot be divided");
         }
         for child in children_of(rect) {
-            read_node(r, out, img_w, stride, coded, child, min_leaf, depth + 1)?;
+            read_node(
+                r,
+                out,
+                img_w,
+                stride,
+                coded,
+                child,
+                min_leaf,
+                skip_forced,
+                depth + 1,
+            )?;
         }
         return Ok(());
     }
@@ -287,19 +397,20 @@ fn read_node(
 }
 
 pub fn decode(bytes: &[u8]) -> Result<RawImage> {
-    if bytes.len() < 10 {
+    if bytes.len() < 11 {
         bail!("quadtree stream is shorter than its header");
     }
     let width = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let height = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let channels = bytes[8];
     let min_leaf = u32::from(bytes[9]);
+    let skip_forced = bytes[10] != 0;
     if width == 0 || height == 0 || !matches!(channels, 1..=4) || min_leaf == 0 {
         bail!("quadtree header declares impossible geometry");
     }
 
     let (plan, plan_len) =
-        ChannelPlan::parse(&bytes[10..], channels).map_err(|e| anyhow::anyhow!(e))?;
+        ChannelPlan::parse(&bytes[11..], channels).map_err(|e| anyhow::anyhow!(e))?;
     let coded = plan.coded_indices();
     let stride = usize::from(channels);
     let len = (width as usize)
@@ -319,14 +430,24 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     }
 
     if !coded.is_empty() {
-        let mut r = BitReader::new(&bytes[10 + plan_len..]);
+        let mut r = BitReader::new(&bytes[11 + plan_len..]);
         let root = BlockRect {
             x: 0,
             y: 0,
             w: width,
             h: height,
         };
-        read_node(&mut r, &mut data, width, stride, &coded, root, min_leaf, 0)?;
+        read_node(
+            &mut r,
+            &mut data,
+            width,
+            stride,
+            &coded,
+            root,
+            min_leaf,
+            skip_forced,
+            0,
+        )?;
     }
 
     for c in 0..stride {
@@ -395,8 +516,8 @@ mod tests {
     fn a_solid_colour_is_header_only() {
         let img = image(64, 64, 3, |_, _, c| [1u8, 2, 3][c as usize]);
         let bytes = encode(&img, 2);
-        // width, height, channels, min_leaf, modes byte, three constants.
-        assert_eq!(bytes.len(), 14);
+        // width, height, channels, min_leaf, flag byte, modes byte, three constants.
+        assert_eq!(bytes.len(), 15);
         assert_eq!(decode(&bytes).unwrap(), img);
     }
 
