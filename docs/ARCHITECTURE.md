@@ -76,5 +76,7 @@ These hold for every commit. Breaking one is a bug, not a trade-off:
 
 The hot loops are `scan_min_max` (a reduction, auto-vectorizes well) and the bit pack/unpack loops
 (shift/mask through a `u64` accumulator). Both are ALU- and bandwidth-bound with almost no
-branching. Measure with `cargo bench -p brp-core` before optimizing; `unsafe` fast paths require a
-criterion regression showing the win and an ADR.
+branching. On the reading side that accumulator persists across calls and is refilled eight bytes
+at a time, so a field costs a shift and a subtract; anything that needs bits should go through
+`BitReader` rather than indexing the buffer itself. Measure with `cargo bench -p brp-core` before
+optimizing; `unsafe` fast paths require a criterion regression showing the win and an ADR.

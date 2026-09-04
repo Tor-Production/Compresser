@@ -43,6 +43,9 @@ Two, and the difference between them is the most important thing on this page.
 | `brp[whole]` | 100.0% | 194 MiB/s | 186 MiB/s |
 | `filter+brp[8x8]` (no zigzag) | 102.3% | 74 MiB/s | 120 MiB/s |
 
+The throughput columns predate the refilling bit reader (finding 10): every pipeline that decodes
+through `brp-core`'s `BitReader` is faster than shown. Sizes are unaffected.
+
 ## Results on the full corpus (9.8 MiB raw, synthetic + photographs)
 
 | Pipeline | Size | Encode | Decode |
@@ -60,6 +63,8 @@ Two, and the difference between them is the most important thing on this page.
 | `raw+lzw` | 80.9% | 30 MiB/s | 107 MiB/s |
 | `filter+brp[8x8]` | 84.9% | 78 MiB/s | 136 MiB/s |
 | `brp[whole]` | 90.1% | 212 MiB/s | 229 MiB/s |
+
+The same caveat applies to the throughput columns here.
 
 ## Findings
 
@@ -254,6 +259,43 @@ the zero case with a single `read(1)` first and scanning only once the run is kn
 The lesson is the same one finding 3 taught: optimising the case you were thinking about can
 pessimise the case that actually dominates. The control benchmarks are what caught it.
 
+### 10. The decoder's remaining cost was call overhead, not the codes
+
+Finding 9 left decode at 60 MiB/s while encode had moved to 27, and blamed per-sample call
+overhead in `BitReader`: every `read` re-derived a byte index, a bit offset and a mask, and Rice
+asks for two or three fields per sample. Replacing it with a refilling reader — a 64-bit
+accumulator, topped up eight bytes at a time, serving `read` and `read_unary` from shifts on it —
+confirms that diagnosis.
+
+Decode, 512x512, at 8x8 blocks:
+
+| | noise RGB | narrow-band RGB |
+|---|---:|---:|
+| Fixed width, no prediction | **1.9x** | 1.5x |
+| Prediction, fixed width | 1.5x | 1.3x |
+| Prediction + Rice, the default | **1.6x** | 1.2x |
+
+The encoder does not touch the reader, so its six configurations are the control: they moved
+-1.6% to +2.6%, twice, which bounds the noise on this machine well below the effect.
+
+End to end on the photographs the shipped configuration went from 60 MiB/s to **89** on decode,
+with encode unchanged at 27 and output byte-identical at 62.5%. `filter+deflate`, which shares no
+code with the reader, measured 105 MiB/s against a recorded 103 — so the decode gap to PNG's
+approach is 16 points rather than 43.
+
+Two details in the implementation earned their place:
+
+- **The accumulator holds 56 bits, not 64.** Whole bytes only, and deliberately short of the
+  type's width, so no shift in the reader can reach 64 — including the one that otherwise would,
+  consuming a whole accumulator of unary ones plus their terminator. The price is a refill every
+  56 bits rather than every 64 — one extra load per seven, against a branch on every shift.
+- **The bits below the valid ones are kept zero.** That is what lets `read_unary` call
+  `leading_ones` on the accumulator and get the run length in one operation, whatever its length,
+  without counting bits that were never read from the file.
+
+Note for the next reader of this file: the plain block-packing rows are *not* controls for a
+change to `BitReader` — they are its purest measurement. Only the encoder rows control it.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the
@@ -271,9 +313,9 @@ cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
 
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
 2. ~~Replace fixed-width block packing with Golomb-Rice.~~ Done, version 4.
-3. ~~Make Rice fast.~~ Partly done: encode 1.6-1.9x, decode 1.0-1.1x, no format change. Decode is
-   now the weak side — 60 MiB/s against `filter+deflate`'s 103. The remaining cost is per-sample
-   call overhead in `BitReader`, which a 64-bit refill accumulator would remove.
+3. ~~Make Rice fast.~~ Done: encode 1.6-1.9x (finding 9), decode 1.2-1.9x (finding 10), neither
+   changing an output bit. On the photographs the shipped configuration now measures 27 MiB/s
+   encoding and 89 decoding, against `filter+deflate`'s 10 and 105.
 4. **Context modelling for the Rice parameter.** This is where JPEG-LS gets its remaining edge:
    choose `k` from quantised local gradients rather than per block, so the model adapts within a
    block instead of across it.

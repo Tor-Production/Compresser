@@ -25,6 +25,12 @@ one `write` call per Rice code instead of a loop of single-bit writes, one pass 
 Rice parameters instead of nine. Encode 1.6-1.9x, decode 1.0-1.1x, output bit-identical. The
 roadmap had blamed the unary loop; measurement showed prediction was the larger encode cost.
 
+**A refilling bit reader** (no format change) — the decoder serves fields from a 64-bit
+accumulator refilled eight bytes at a time, instead of re-deriving a byte index, an offset and a
+mask on every call. Decode 1.2-1.9x depending on configuration; on the photographs the shipped
+configuration went from 60 MiB/s to **89**, against `filter+deflate`'s 105. Encode was untouched
+and served as the control. Output bit-identical, which is what the golden fixtures are for.
+
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, and the `residual-shape` tool that measures what the format actually
 emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
@@ -32,19 +38,7 @@ enough to have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. A refilling bit reader  ← next
-
-Decode is now the weak side: 60 MiB/s against `filter+deflate`'s 103, where encode is 27 against 9.
-The encoder work is done; the decoder's remaining cost is per-sample call overhead in `BitReader`,
-which re-derives its byte index, offset and mask for every field.
-
-The fix is standard: keep a 64-bit accumulator, refill it eight bytes at a time, and serve `read`
-and `read_unary` from shifts on that. Rice needs two or three field reads per sample, so the saving
-compounds.
-
-No format change, and the golden fixtures pin the output while it is done.
-
-### 2. Context modelling for the Rice parameter
+### 1. Context modelling for the Rice parameter  ← next
 
 This is where JPEG-LS gets its remaining edge, and BRP has now converged on JPEG-LS's architecture
 by measurement rather than by imitation. Instead of one parameter per block, choose `k` from a
@@ -54,13 +48,13 @@ blocks.
 Expect this to subsume much of what adaptive block size would have bought, which is why it comes
 first.
 
-### 3. Adaptive block size
+### 2. Adaptive block size
 
 `quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure
 is now stale: the model assumed fixed-width packing, and has to be rewritten around Rice's cost
 before it means anything. Re-measure before implementing.
 
-### 4. Better predictors
+### 3. Better predictors
 
 The five PNG predictors were adopted because they measured best among the variants tried, not
 because they are optimal. Worth testing: the gradient-adjusted predictor from LOCO-I/JPEG-LS, and
