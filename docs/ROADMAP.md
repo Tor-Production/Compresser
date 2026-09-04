@@ -31,7 +31,7 @@ mask on every call. Decode 1.2-1.9x depending on configuration; on the photograp
 configuration went from 60 MiB/s to **89**, against `filter+deflate`'s 105. Encode was untouched
 and served as the control. Output bit-identical, which is what the golden fixtures are for.
 
-**Measurement harness** (`cim-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
+**Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, and the `residual-shape` tool that measures what the format actually
 emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
 enough to have justified building the wrong thing.
@@ -40,7 +40,7 @@ enough to have justified building the wrong thing.
 
 ### 1. Context modelling for the Rice parameter  ← next
 
-This is where JPEG-LS gets its remaining edge, and Cimilarity has now converged on JPEG-LS's architecture
+This is where JPEG-LS gets its remaining edge, and BRP has now converged on JPEG-LS's architecture
 by measurement rather than by imitation. Instead of one parameter per block, choose `k` from a
 context of quantised local gradients, so the model adapts *within* a block rather than only across
 blocks.
@@ -75,7 +75,7 @@ choosing the predictor per block rather than per row.
 
 - **LZW.** Measured at 80.9% against Deflate's 56.0% on the same bytes. Dictionary matching without
   a good entropy stage is not competitive, and Deflate already provides both.
-- **Patched frame of reference.** The textbook fix for Cimilarity's exact weakness, and half our blocks
+- **Patched frame of reference.** The textbook fix for BRP's exact weakness, and half our blocks
   have their width set by three samples or fewer — yet it recovers 3.5% against Rice's 16.5%. The
   outliers were never the main cost; the rest of the block was.
 - **A per-block choice between fixed width and Rice.** The one-bit flag costs more than the rare

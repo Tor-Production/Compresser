@@ -1,12 +1,12 @@
-# Cimilarity v4 — bitstream specification
+# BRP v4 — Block Range Packing bitstream specification
 
-**Status:** normative. The implementation in `crates/cim-core` MUST match this document.
-Golden-byte tests in `crates/cim-core/tests/golden.rs` enforce the match. Any change to this
+**Status:** normative. The implementation in `crates/brp-core` MUST match this document.
+Golden-byte tests in `crates/brp-core/tests/golden.rs` enforce the match. Any change to this
 document requires a version bump and an ADR in `docs/adr/`.
 
 ## 1. Overview
 
-Cimilarity is a lossless raster image format. It exploits *local* range coherence: within a small region
+BRP is a lossless raster image format. It exploits *local* range coherence: within a small region
 of an image, a channel usually spans far fewer distinct values than its full dynamic range, so
 fewer than `bit_depth` bits per sample are needed.
 
@@ -59,7 +59,7 @@ Byte-aligned, at offset 0.
 
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
-| 0      | `magic`         | 4 B  | `43 49 4D 1A` — ASCII `CIM` followed by 0x1A              |
+| 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
 | 4      | `version`       | u8   | `4`                                                       |
 | 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
@@ -263,7 +263,7 @@ overhead — and instead costs 28 bytes in total.
 
 A decoder MUST reject, with an error and never a panic:
 
-- `magic` != `43 49 4D 1A`
+- `magic` != `42 52 50 1A`
 - `version` != 4
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
@@ -305,12 +305,7 @@ is already the full width of the bit depth.
 
 | Version | Change |
 |--------:|--------|
-| 1 | Initial format: per-block, per-channel base + fixed-width residual packing; constant-alpha elision via a single flag bit. Magic was `BRP1`, under the format's former name. |
+| 1 | Initial format: per-block, per-channel base + fixed-width residual packing; constant-alpha elision via a single flag bit. Magic was `BRP1`. |
 | 2 | Version-independent magic. Constant-channel elision generalised from alpha to every channel, and channel aliasing added, both as a whole-image stage before block packing. Replaces the v1 `ALPHA_CONSTANT` flag. |
 | 3 | Optional spatial prediction with zigzagged residuals, selected per row from PNG's five predictors, recorded in a new `filter_mode` header byte. |
 | 4 | Golomb-Rice as an alternative block coder, selected per file by a new `block_coder` header byte. Gives up the ability to compute a block's payload size from its headers. |
-
-The magic changed from `42 52 50 1A` to `43 49 4D 1A` when the format was renamed from BRP to
-Cimilarity, and deliberately without a version bump: nothing past those four bytes moved, and a
-reader that understands version 4 decodes both identically once the magic check has passed. The
-magic is already a hard fence — an old file is rejected as `BadMagic`, not misread. See ADR 0008.

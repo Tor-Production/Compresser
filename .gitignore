@@ -5,9 +5,9 @@ proptest-regressions/
 
 # The sample corpus is fetched or generated, never committed: the synthetic images are
 # deterministic, and the photographs are not ours to redistribute.
-#   cargo run -p cim-bench --bin gen-samples -- samples/
+#   cargo run -p brp-bench --bin gen-samples -- samples/
 #   pwsh scripts/fetch-photos.ps1
 /samples/*.png
 /samples/*.webp
-/samples/*.cim
+/samples/*.brp
 /samples/out/

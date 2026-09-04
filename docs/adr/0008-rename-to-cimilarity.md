@@ -1,6 +1,9 @@
 # ADR 0008 — Rename the format to Cimilarity
 
-**Status:** accepted (2026-09-05)
+**Status:** superseded by ADR 0009 (2026-09-05). Accepted and enacted, then reverted the same
+day. Kept rather than deleted: the decision was really made, and the question it frames — what a
+format's name should describe — is still open. Everything below describes a state of the tree that
+no longer exists.
 
 ## Context
 

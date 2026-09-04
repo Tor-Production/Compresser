@@ -1,11 +1,11 @@
-# Cimilarity — a lossless image codec
+# BRP — Block Range Packing
 
 A lossless image codec and file format built from scratch.
 
 ## The idea
 
 Within a small region of an image, a colour channel usually spans far fewer values than its full
-0–255 range. Cimilarity exploits exactly that, and nothing else:
+0–255 range. BRP exploits exactly that, and nothing else:
 
 1. Split the image into blocks.
 2. For each block, for each channel independently, find `min` and `max`.
@@ -44,14 +44,14 @@ On eight Kodak photographs (9.0 MiB raw), 8x8 blocks:
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
 | `filter+deflate` — a tuned PNG-style pipeline | **57.5%** | 9 MiB/s | 96 MiB/s |
-| **Cimilarity v4, default settings** | **60.7%** | 24 MiB/s | 80 MiB/s |
-| Cimilarity v4 with Deflate on top | 59.7% | 17 MiB/s | 66 MiB/s |
+| **BRP v4, default settings** | **60.7%** | 24 MiB/s | 80 MiB/s |
+| BRP v4 with Deflate on top | 59.7% | 17 MiB/s | 66 MiB/s |
 | `raw+deflate` | 64.4% | 27 MiB/s | 174 MiB/s |
-| Cimilarity v3 configuration (prediction, fixed width) | 72.3% | 50 MiB/s | 161 MiB/s |
-| Cimilarity v2 configuration (no prediction) | 75.5% | 188 MiB/s | 422 MiB/s |
+| BRP v3 configuration (prediction, fixed width) | 72.3% | 50 MiB/s | 161 MiB/s |
+| BRP v2 configuration (no prediction) | 75.5% | 188 MiB/s | 422 MiB/s |
 
 Against real encoders on the same photographs: the `image` crate's PNG output is 65.1%, WebP
-lossless 48.6%. So Cimilarity beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
+lossless 48.6%. So BRP beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
 pipeline by 3.2 points, and trails WebP by more.
 
 Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
@@ -79,19 +79,19 @@ cargo build --release
 ```
 
 ```bash
-cargo run -p cim-cli --release -- encode input.png output.cim --block-size 16x16
+cargo run -p brp-cli --release -- encode input.png output.brp --block-size 16x16
 ```
 
 ```bash
-cargo run -p cim-cli --release -- encode input.png output.cim --filter off --coder fixed
+cargo run -p brp-cli --release -- encode input.png output.brp --filter off --coder fixed
 ```
 
 ```bash
-cargo run -p cim-cli --release -- info output.cim
+cargo run -p brp-cli --release -- info output.brp
 ```
 
 ```bash
-cargo run -p cim-cli --release -- decode output.cim roundtrip.png
+cargo run -p brp-cli --release -- decode output.brp roundtrip.png
 ```
 
 ## Test and measure
@@ -101,7 +101,7 @@ cargo test --workspace
 ```
 
 ```bash
-cargo run -p cim-bench --bin gen-samples -- samples/
+cargo run -p brp-bench --bin gen-samples -- samples/
 ```
 
 ```bash
@@ -109,29 +109,29 @@ pwsh scripts/fetch-photos.ps1
 ```
 
 ```bash
-cargo run -p cim-bench --release -- samples/
+cargo run -p brp-bench --release -- samples/
 ```
 
 ```bash
-cargo bench -p cim-core
+cargo bench -p brp-core
 ```
 
 ```bash
-cargo run -p cim-lab --release -- samples/
+cargo run -p brp-lab --release -- samples/
 ```
 
-`cim-bench` decodes every file it measures and compares it against the source pixels, so a run that
+`brp-bench` decodes every file it measures and compares it against the source pixels, so a run that
 prints a table has also proved the round-trip on real image data.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `crates/cim-core` | The codec. No image-format dependencies, no `unsafe`. |
-| `crates/cim-imageio` | PNG and WebP bridge, shared by the CLI and the benchmark. |
-| `crates/cim-cli` | `encode` / `decode` / `info`. |
-| `crates/cim-bench` | Compression-ratio table against PNG and WebP, plus the sample generator. |
-| `crates/cim-lab` | Experimental pipelines and the `residual-shape` tool. Not part of the format. |
+| `crates/brp-core` | The codec. No image-format dependencies, no `unsafe`. |
+| `crates/brp-imageio` | PNG and WebP bridge, shared by the CLI and the benchmark. |
+| `crates/brp-cli` | `encode` / `decode` / `info`. |
+| `crates/brp-bench` | Compression-ratio table against PNG and WebP, plus the sample generator. |
+| `crates/brp-lab` | Experimental pipelines and the `residual-shape` tool. Not part of the format. |
 | `docs/FORMAT.md` | Normative bitstream specification. Outranks the code. |
 | `docs/ARCHITECTURE.md` | Module map, data flow, invariants. |
 | `docs/EXPERIMENTS.md` | Measured results, and what they say to build next. |

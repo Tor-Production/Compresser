@@ -1,0 +1,12 @@
+[package]
+name = "brp-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brp-core = { workspace = true }
+brp-imageio = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }

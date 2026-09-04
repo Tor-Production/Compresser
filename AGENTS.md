@@ -4,13 +4,7 @@ Read this file first. It is the shortest path to being useful in this repository
 
 ## What this project is
 
-Cimilarity is a **lossless image codec and file format**, written from scratch. The name is the
-thesis: every stage finds something in the image that resembles something else — channels that
-resemble each other, pixels that resemble their neighbours, values that resemble the rest of their
-block — and stores only the difference.
-
-It was called BRP, for Block Range Packing, until ADR 0008. Block range packing is still what
-stage 2 does; it stopped being the whole story once prediction and Rice landed.
+BRP (Block Range Packing) is a **lossless image codec and file format**, written from scratch.
 
 Encoding has two stages.
 
@@ -33,7 +27,7 @@ paying for its own magnitude). Rice is worth 12 points on photographs and is the
 
 | Question | Authoritative source |
 |---|---|
-| What does a valid `.cim` file look like? | `docs/FORMAT.md` — **normative** |
+| What does a valid `.brp` file look like? | `docs/FORMAT.md` — **normative** |
 | How is the code organized, what must never break? | `docs/ARCHITECTURE.md` |
 | Why is it this way? | `docs/adr/` |
 | What have we measured? | `docs/EXPERIMENTS.md` |
@@ -44,14 +38,14 @@ paying for its own magnitude). Rice is worth 12 points on photographs and is the
 ## Rules that are easy to violate by accident
 
 1. **Never change the bitstream without a version bump and an ADR.** Golden tests in
-   `crates/cim-core/tests/golden.rs` will fail; do not "fix" them by regenerating the expected
+   `crates/brp-core/tests/golden.rs` will fail; do not "fix" them by regenerating the expected
    bytes unless you are deliberately versioning the format.
 2. **Encode and decode change together**, in the same commit. So does `analysis.rs`, which walks
    the same structure and must accept exactly the files the decoder accepts — a test asserts it.
-3. **`cim-core` must not gain an image-format dependency.** The `image` crate belongs to
-   `cim-imageio` alone; `cim-cli` and `cim-bench` go through that. Keeping PNG and WebP out of the
+3. **`brp-core` must not gain an image-format dependency.** The `image` crate belongs to
+   `brp-imageio` alone; `brp-cli` and `brp-bench` go through that. Keeping PNG and WebP out of the
    core is what keeps the `wasm32` and C-ABI targets on the roadmap reachable.
-4. **No `unsafe` in `cim-core`.**
+4. **No `unsafe` in `brp-core`.**
 5. **The decoder parses untrusted input.** Every value read from a file is hostile until validated
    against `FORMAT.md` §7. No unchecked indexing, no unchecked arithmetic on header fields,
    and **no allocation sized from header fields without a limit check** — a 24-byte header can ask
@@ -65,10 +59,7 @@ paying for its own magnitude). Rice is worth 12 points on photographs and is the
    the same loop has already restored, so it must run in raster order, and aliases must follow it.
 9. **Under Rice a block's payload size is not computable from its header.** Rice codes are
    variable-length. Anything that used to skip a payload has to walk it instead.
-10. **ADRs 0001-0007 use the format's former name, BRP.** They were not edited when it was
-   renamed (ADR 0008), because an ADR records a decision as it was made. Do not retrofit the
-   current name into them, and do not "fix" the `brp-lab` and `brp[8x8]` names they contain.
-11. **Experimental compression back-ends live in `cim-lab`,** never in the format. `cim-lab` exists
+10. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
    to measure candidates; a pipeline earns its way into `FORMAT.md` by winning on the corpus, and
    then only with a version bump and an ADR.
 
@@ -77,10 +68,10 @@ paying for its own magnitude). Rice is worth 12 points on photographs and is the
 ```bash
 cargo test --workspace                   # round-trip, golden, malformed, proptest
 cargo clippy --workspace -- -D warnings
-cargo bench -p cim-core                  # encode/decode MB/s
-cargo run -p cim-bench --release -- samples/   # ratio vs PNG/WebP across block sizes
-cargo run -p cim-lab --release -- samples/     # experimental pipelines: size and speed
-cargo run -p cim-cli --release -- info file.cim
+cargo bench -p brp-core                  # encode/decode MB/s
+cargo run -p brp-bench --release -- samples/   # ratio vs PNG/WebP across block sizes
+cargo run -p brp-lab --release -- samples/     # experimental pipelines: size and speed
+cargo run -p brp-cli --release -- info file.brp
 ```
 
 ## Current state and scope
@@ -95,7 +86,7 @@ min/max span nearly the full range, so the width code lands on 8 and nothing is 
 inherent to stage 2, not a bug to report. Gains appear at 8x8/16x16, and stage 1 handles the
 degenerate images regardless of block size.
 
-Not in the format, and not to be added without measurements from `cim-lab`: entropy coding,
+Not in the format, and not to be added without measurements from `brp-lab`: entropy coding,
 predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode.
 
 **Before claiming anything about compression, read `docs/EXPERIMENTS.md`.** Two results there
