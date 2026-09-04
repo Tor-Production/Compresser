@@ -55,57 +55,81 @@ pub fn cost(v: u32, k: u32) -> u32 {
 }
 
 /// Total payload bits for a block at parameter `k`.
-pub fn block_cost(values: &[u8], k: u32) -> u64 {
+///
+/// The obvious implementation, kept as the reference [`all_block_costs`] is checked against.
+#[cfg(test)]
+fn block_cost(values: &[u8], k: u32) -> u64 {
     values
         .iter()
         .map(|&v| u64::from(cost(u32::from(v), k)))
         .sum()
 }
 
+/// Payload bits for a block at every parameter, in one pass over the values.
+///
+/// Costing the nine separately walked the block nine times; this loads each value once and
+/// charges all nine accumulators from it. The numbers are unchanged — the same exhaustive search,
+/// reordered.
+fn all_block_costs(values: &[u8]) -> [u64; MAX_K as usize + 1] {
+    let mut acc = [0u64; MAX_K as usize + 1];
+    for &v in values {
+        let v = u32::from(v);
+        for (k, total) in acc.iter_mut().enumerate() {
+            *total += u64::from(cost(v, k as u32));
+        }
+    }
+    acc
+}
+
 /// The mode this block should use, and the payload bits it will cost.
 ///
-/// Exhaustive over the nine parameters, which is nine cheap passes over at most a few hundred
-/// values and keeps the choice exact rather than heuristic.
+/// Exhaustive over the nine parameters, so the choice is exact rather than heuristic, and cheap
+/// enough to stay that way. Ties go to the smaller parameter.
 pub fn choose_mode(values: &[u8]) -> (u32, u64) {
     if values.iter().all(|&v| v == 0) {
         return (MODE_CONSTANT, 0);
     }
-    let k = (0..=MAX_K)
-        .min_by_key(|&k| block_cost(values, k))
-        .unwrap_or(0);
-    (k + 1, block_cost(values, k))
+    let costs = all_block_costs(values);
+    let mut best_k = 0usize;
+    for (k, &bits) in costs.iter().enumerate() {
+        if bits < costs[best_k] {
+            best_k = k;
+        }
+    }
+    (best_k as u32 + 1, costs[best_k])
 }
 
 /// Writes one residual.
+///
+/// The whole code goes out in a single field — at most 16 bits — rather than a loop of one-bit
+/// writes. The bits are identical; only the number of calls changes.
 #[inline]
 pub fn write(w: &mut BitWriter, v: u32, k: u32) {
     let q = v >> k;
     if q >= ESCAPE {
-        for _ in 0..ESCAPE {
-            w.write(1, 1);
-        }
-        w.write(v, SAMPLE_BITS);
+        // Eight ones with no terminator, then the value verbatim.
+        w.write((0xFF << SAMPLE_BITS) | v, ESCAPE + SAMPLE_BITS);
     } else {
-        for _ in 0..q {
-            w.write(1, 1);
-        }
-        w.write(0, 1);
-        if k > 0 {
-            w.write(v & ((1 << k) - 1), k);
-        }
+        // `q` ones, a terminating zero, then the low `k` bits, assembled in place.
+        let unary = ((1u32 << q) - 1) << (k + 1);
+        let low = v & ((1u32 << k) - 1);
+        w.write(unary | low, q + 1 + k);
     }
 }
 
 /// Reads one residual.
+///
+/// The parameter is chosen so that most quotients are zero, so the zero case is settled with a
+/// single bit before anything more elaborate runs. Scanning a byte at a time only pays once the
+/// run is actually long, and routing every sample through it measured *slower* on low-entropy
+/// data than the bit-at-a-time reader it was meant to replace.
 #[inline]
 pub fn read(r: &mut BitReader, k: u32) -> Result<u32> {
-    let mut q = 0u32;
-    while q < ESCAPE {
-        if r.read(1)? == 0 {
-            break;
-        }
-        q += 1;
-    }
+    let q = if r.read(1)? == 0 {
+        0
+    } else {
+        1 + r.read_unary(ESCAPE - 1)?
+    };
     if q >= ESCAPE {
         return r.read(SAMPLE_BITS);
     }
@@ -149,6 +173,24 @@ mod tests {
                 let mut w = BitWriter::new();
                 write(&mut w, v, k);
                 assert_eq!(w.bit_len(), u64::from(cost(v, k)), "k {k}, value {v}");
+            }
+        }
+    }
+
+    /// The single-pass search must agree with costing each parameter separately.
+    #[test]
+    fn the_two_cost_paths_agree() {
+        let cases: Vec<Vec<u8>> = vec![
+            (0..64u8).collect(),
+            vec![0; 64],
+            vec![255; 64],
+            (0..64).map(|i| if i % 7 == 0 { 200 } else { 1 }).collect(),
+            (0..64).map(|i| (i * 37 % 251) as u8).collect(),
+        ];
+        for values in cases {
+            let bulk = all_block_costs(&values);
+            for (k, &bits) in bulk.iter().enumerate() {
+                assert_eq!(bits, block_cost(&values, k as u32), "k {k}");
             }
         }
     }

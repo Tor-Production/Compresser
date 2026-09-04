@@ -138,6 +138,66 @@ impl<'a> BitReader<'a> {
         Ok(acc as u32)
     }
 
+    /// Counts one-bits until a zero, or until `max` of them, whichever comes first.
+    ///
+    /// The terminating zero is consumed; a run that reaches `max` has no terminator to consume.
+    /// This exists because reading a unary prefix one bit at a time dominated Rice decoding on
+    /// high-entropy data — scanning a byte at a time with `leading_ones` is several times faster
+    /// and produces identical results.
+    #[inline]
+    pub fn read_unary(&mut self, max: u32) -> Result<u32> {
+        let byte = *self
+            .buf
+            .get(self.bit_pos >> 3)
+            .ok_or(BrpError::UnexpectedEof)?;
+        let consumed = (self.bit_pos & 7) as u32;
+        let available = 8 - consumed;
+        // Left-aligning the unread bits makes the shifted-in zeros stop the count, so this can
+        // never exceed `available`.
+        let ones = (byte << consumed).leading_ones();
+
+        // The overwhelmingly common case: a short run whose terminating zero is in the same byte.
+        // Rice parameters are chosen so that most quotients are zero or one, and routing those
+        // through the general loop measured *slower* than the bit-at-a-time reader it replaced.
+        if ones < available && ones < max {
+            self.bit_pos += ones as usize + 1;
+            return Ok(ones);
+        }
+        self.read_unary_spanning(max)
+    }
+
+    /// The rare tail of [`read_unary`]: the run fills its byte, or reaches the cap.
+    fn read_unary_spanning(&mut self, max: u32) -> Result<u32> {
+        let mut count = 0u32;
+        loop {
+            if count == max {
+                return Ok(count);
+            }
+            let byte = *self
+                .buf
+                .get(self.bit_pos >> 3)
+                .ok_or(BrpError::UnexpectedEof)?;
+            let consumed = (self.bit_pos & 7) as u32;
+            let available = 8 - consumed;
+            let ones = (byte << consumed).leading_ones();
+
+            if count + ones >= max {
+                // The cap falls inside this byte; stop there, with no terminator to consume.
+                self.bit_pos += (max - count) as usize;
+                return Ok(max);
+            }
+            count += ones;
+            self.bit_pos += ones as usize;
+
+            if ones < available {
+                // A zero ended the run, still inside this byte.
+                self.bit_pos += 1;
+                return Ok(count);
+            }
+            // The byte was all ones: carry on into the next.
+        }
+    }
+
     /// Advances by `nbits` without decoding them.
     pub fn skip(&mut self, nbits: u64) -> Result<()> {
         let nbits = usize::try_from(nbits).map_err(|_| BrpError::UnexpectedEof)?;
@@ -261,6 +321,52 @@ mod tests {
 
         let mut r = BitReader::new(&[]);
         assert_eq!(r.read(1), Err(BrpError::UnexpectedEof));
+    }
+
+    #[test]
+    fn read_unary_matches_reading_bit_by_bit() {
+        // Every arrangement of a short run, against the obvious implementation.
+        for pattern in 0..=0xFFFFu32 {
+            for max in 1..=8u32 {
+                let bytes = pattern.to_be_bytes();
+                let bytes = &bytes[2..];
+
+                let mut slow = BitReader::new(bytes);
+                let mut expected = 0u32;
+                while expected < max {
+                    match slow.read(1) {
+                        Ok(1) => expected += 1,
+                        Ok(_) => break,
+                        Err(_) => break,
+                    }
+                }
+
+                let mut fast = BitReader::new(bytes);
+                let got = fast.read_unary(max).unwrap();
+                assert_eq!(got, expected, "pattern {pattern:#06x}, max {max}");
+                assert_eq!(
+                    fast.bit_pos(),
+                    slow.bit_pos(),
+                    "position differs: pattern {pattern:#06x}, max {max}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn read_unary_reports_eof() {
+        let mut r = BitReader::new(&[0xFF]);
+        assert_eq!(
+            r.read_unary(8).unwrap(),
+            8,
+            "a full byte of ones hits the cap"
+        );
+
+        let mut r = BitReader::new(&[0xFF]);
+        assert_eq!(r.read_unary(16), Err(BrpError::UnexpectedEof));
+
+        let mut r = BitReader::new(&[]);
+        assert_eq!(r.read_unary(1), Err(BrpError::UnexpectedEof));
     }
 
     #[test]

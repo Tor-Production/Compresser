@@ -65,29 +65,57 @@ pub fn unzigzag(z: u8) -> u8 {
     (z >> 1) ^ 0u8.wrapping_sub(z & 1)
 }
 
-/// Neighbours of one sample, taking absent ones as zero exactly as PNG does.
-#[inline]
-fn neighbours(data: &[u8], w: usize, stride: usize, x: usize, y: usize, c: usize) -> (u8, u8, u8) {
-    let at = |x: usize, y: usize| data[(y * w + x) * stride + c];
-    (
-        if x > 0 { at(x - 1, y) } else { 0 },
-        if y > 0 { at(x, y - 1) } else { 0 },
-        if x > 0 && y > 0 { at(x - 1, y - 1) } else { 0 },
-    )
-}
+/// Sum of absolute residuals for one row under *every* predictor, in a single pass.
+///
+/// Costing the five separately meant five passes over the row, each recomputing the same three
+/// neighbours; that was the single largest cost in encoding — prediction dropped throughput more
+/// than Rice coding did. The numbers produced are unchanged.
+///
+/// Neighbours outside the image read as zero, exactly as PNG specifies.
+fn row_costs(
+    data: &[u8],
+    w: usize,
+    stride: usize,
+    coded: &CodedIndices,
+    y: usize,
+) -> [u64; FILTER_KINDS as usize] {
+    let mut acc = [0u64; FILTER_KINDS as usize];
+    let row = w * stride;
 
-/// Sum of absolute residuals for one row under one predictor, across the coded channels.
-fn row_cost(data: &[u8], w: usize, stride: usize, coded: &CodedIndices, y: usize, kind: u8) -> u64 {
-    let mut acc = 0u64;
     for slot in 0..coded.len() {
         let c = coded.channel(slot);
+        let mut i = y * row + c;
         for x in 0..w {
-            let (l, a, ul) = neighbours(data, w, stride, x, y, c);
-            let r = data[(y * w + x) * stride + c].wrapping_sub(predict(kind, l, a, ul));
-            acc += u64::from((r as i8).unsigned_abs());
+            let left = if x > 0 { data[i - stride] } else { 0 };
+            let above = if y > 0 { data[i - row] } else { 0 };
+            let upper_left = if x > 0 && y > 0 {
+                data[i - row - stride]
+            } else {
+                0
+            };
+            let sample = data[i];
+            for (kind, total) in acc.iter_mut().enumerate() {
+                let r = sample.wrapping_sub(predict(kind as u8, left, above, upper_left));
+                *total += u64::from((r as i8).unsigned_abs());
+            }
+            i += stride;
         }
     }
     acc
+}
+
+/// The predictor with the lowest cost, ties going to the lower kind.
+#[inline]
+fn cheapest(costs: &[u64; FILTER_KINDS as usize]) -> u8 {
+    let mut best = 0u8;
+    let mut best_cost = u64::MAX;
+    for (kind, &cost) in costs.iter().enumerate() {
+        if cost < best_cost {
+            best_cost = cost;
+            best = kind as u8;
+        }
+    }
+    best
 }
 
 /// Chooses a predictor per row and produces the residual buffer.
@@ -102,29 +130,29 @@ pub fn apply(
     coded: &CodedIndices,
 ) -> (Vec<u8>, Vec<u8>) {
     let (w, h) = (width as usize, height as usize);
+    let row = w * stride;
     let mut kinds = vec![0u8; h];
     let mut residuals = data.to_vec();
 
     for (y, kind_for_row) in kinds.iter_mut().enumerate() {
-        let mut best = 0u8;
-        let mut best_cost = u64::MAX;
-        for kind in 0..FILTER_KINDS {
-            let cost = row_cost(data, w, stride, coded, y, kind);
-            if cost < best_cost {
-                best_cost = cost;
-                best = kind;
-            }
-        }
-        *kind_for_row = best;
+        let kind = cheapest(&row_costs(data, w, stride, coded, y));
+        *kind_for_row = kind;
 
         for slot in 0..coded.len() {
             let c = coded.channel(slot);
+            let mut i = y * row + c;
             for x in 0..w {
                 // Predict from the *source* neighbours; the decoder will have reconstructed
                 // exactly these values by the time it reaches this sample.
-                let (l, a, ul) = neighbours(data, w, stride, x, y, c);
-                let i = (y * w + x) * stride + c;
-                residuals[i] = zigzag(data[i].wrapping_sub(predict(best, l, a, ul)));
+                let left = if x > 0 { data[i - stride] } else { 0 };
+                let above = if y > 0 { data[i - row] } else { 0 };
+                let upper_left = if x > 0 && y > 0 {
+                    data[i - row - stride]
+                } else {
+                    0
+                };
+                residuals[i] = zigzag(data[i].wrapping_sub(predict(kind, left, above, upper_left)));
+                i += stride;
             }
         }
     }
@@ -147,15 +175,23 @@ pub fn undo_in_place(
     kinds: &[u8],
 ) {
     let (w, h) = (width as usize, height as usize);
+    let row = w * stride;
     debug_assert_eq!(kinds.len(), h);
 
     for (y, &kind) in kinds.iter().enumerate().take(h) {
         for slot in 0..coded.len() {
             let c = coded.channel(slot);
+            let mut i = y * row + c;
             for x in 0..w {
-                let (l, a, ul) = neighbours(data, w, stride, x, y, c);
-                let i = (y * w + x) * stride + c;
-                data[i] = unzigzag(data[i]).wrapping_add(predict(kind, l, a, ul));
+                let left = if x > 0 { data[i - stride] } else { 0 };
+                let above = if y > 0 { data[i - row] } else { 0 };
+                let upper_left = if x > 0 && y > 0 {
+                    data[i - row - stride]
+                } else {
+                    0
+                };
+                data[i] = unzigzag(data[i]).wrapping_add(predict(kind, left, above, upper_left));
+                i += stride;
             }
         }
     }

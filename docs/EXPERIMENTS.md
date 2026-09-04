@@ -208,6 +208,52 @@ encode, no table walk on decode. That matters because the format's remaining adv
 speed. The current implementation writes the unary prefix one bit at a time and is slower than
 fixed-width packing; that is an implementation cost, not an inherent one.
 
+### 9. Where the encoder's time actually went
+
+The roadmap said the bit-at-a-time unary loop was the thing to fix. Measured, it was not the main
+cost. At 8x8 blocks on full-range noise, encode throughput fell like this:
+
+| Stage | Encode | Decode |
+|---|---:|---:|
+| Fixed width, no prediction | 179 MiB/s | 270 MiB/s |
+| + prediction | 43 | 154 |
+| + prediction + Rice | 29 | 62 |
+
+**Prediction cost more encode throughput than Rice did** — 4.2x against 1.5x. The per-row filter
+search was walking each row five times, once per predictor, recomputing the same three neighbours
+every pass. Rice's cost was real but second.
+
+On decode the split is the other way: Rice dominates on high-entropy data (154 to 62) and is nearly
+free on low-entropy data (173 to 170), because the unary run length tracks the residual magnitude.
+
+Three changes, none of which alter a single output bit — the golden fixtures verify that:
+
+- **One pass to cost all five predictors** instead of five, reusing the neighbours.
+- **One `write` call per Rice code** instead of a loop of single-bit writes: the unary prefix, its
+  terminator and the low bits assemble into one field of at most 16 bits.
+- **One pass to cost all nine Rice parameters** instead of nine, loading each value once.
+
+Measured effect, controls confirming the setup at 0.96-1.02x:
+
+| | Encode | Decode |
+|---|---:|---:|
+| Prediction alone | **1.55-1.73x** | 1.12-1.17x |
+| Prediction + Rice | **1.38-1.87x** | 1.00-1.07x |
+
+On the photograph corpus end to end, the shipped configuration went from 17 MiB/s to **27** on
+encode and 55 to **60** on decode, at identical output.
+
+#### A negative result worth keeping
+
+The first attempt replaced the whole unary read with a byte-scanning loop using `leading_ones`.
+It helped high-entropy data and made low-entropy data **16% slower** — Rice parameters are chosen
+so that most quotients are zero, and routing a one-bit answer through a scan loop costs more than
+reading the bit. Splitting a fast path out of the loop did not fix it either; what did was checking
+the zero case with a single `read(1)` first and scanning only once the run is known to be long.
+
+The lesson is the same one finding 3 taught: optimising the case you were thinking about can
+pessimise the case that actually dominates. The control benchmarks are what caught it.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the
@@ -225,10 +271,9 @@ cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
 
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
 2. ~~Replace fixed-width block packing with Golomb-Rice.~~ Done, version 4.
-3. **Make Rice fast.** The unary loop moves one bit at a time: encoding fell from 209 MiB/s to 17,
-   decoding from 254 to 55. Speed is the codec's actual advantage over PNG, and most of this is
-   implementation rather than algorithm — a batched unary writer and a table-driven prefix reader
-   are the obvious moves. No format change.
+3. ~~Make Rice fast.~~ Partly done: encode 1.6-1.9x, decode 1.0-1.1x, no format change. Decode is
+   now the weak side — 60 MiB/s against `filter+deflate`'s 103. The remaining cost is per-sample
+   call overhead in `BitReader`, which a 64-bit refill accumulator would remove.
 4. **Context modelling for the Rice parameter.** This is where JPEG-LS gets its remaining edge:
    choose `k` from quantised local gradients rather than per block, so the model adapts within a
    block instead of across it.

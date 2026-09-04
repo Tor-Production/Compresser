@@ -20,6 +20,11 @@ instead of the block's worst case. Photographs went from 74.4% to **62.5%**, clo
 tuned PNG-style pipeline from 15 points to 3.3. Table-free, and it makes an LZ77 stage nearly
 pointless.
 
+**Bit-level speedups** (no format change) — one pass to cost all five predictors instead of five,
+one `write` call per Rice code instead of a loop of single-bit writes, one pass to cost all nine
+Rice parameters instead of nine. Encode 1.6-1.9x, decode 1.0-1.1x, output bit-identical. The
+roadmap had blamed the unary loop; measurement showed prediction was the larger encode cost.
+
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, and the `residual-shape` tool that measures what the format actually
 emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
@@ -27,24 +32,17 @@ enough to have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Make Rice fast  ← next
+### 1. A refilling bit reader  ← next
 
-No format change, and the largest gap between what the codec is and what it claims to be.
+Decode is now the weak side: 60 MiB/s against `filter+deflate`'s 103, where encode is 27 against 9.
+The encoder work is done; the decoder's remaining cost is per-sample call overhead in `BitReader`,
+which re-derives its byte index, offset and mask for every field.
 
-Every stage added has cost throughput: encoding fell from 209 MiB/s at v2 to 17 at v4, decoding
-from 254 to 55. Speed is this codec's actual advantage over PNG — `filter+deflate` encodes at
-9 MiB/s — and v4 has spent most of it.
+The fix is standard: keep a 64-bit accumulator, refill it eight bytes at a time, and serve `read`
+and `read_unary` from shifts on that. Rice needs two or three field reads per sample, so the saving
+compounds.
 
-Most of that is implementation, not algorithm. The unary prefix is written and read one bit at a
-time through the generic bit writer. The obvious moves:
-
-- Emit a whole unary run in one `write` call instead of a loop of single bits.
-- Read the prefix by scanning a refilled 64-bit accumulator with `leading_ones`, rather than bit by
-  bit.
-- Hoist the per-sample coder branch out of the innermost loop; it is fixed for the whole file.
-
-Target: within a factor of two of the fixed-width packer, which would leave BRP an order of
-magnitude faster than `filter+deflate` at 3.3 points behind on size.
+No format change, and the golden fixtures pin the output while it is done.
 
 ### 2. Context modelling for the Rice parameter
 

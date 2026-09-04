@@ -44,11 +44,11 @@ On six Kodak photographs (6.8 MiB raw), 8x8 blocks:
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
 | `filter+deflate` — a tuned PNG-style pipeline | **59.2%** | 9 MiB/s | 108 MiB/s |
-| **BRP v4, default settings** | **62.5%** | 17 MiB/s | 55 MiB/s |
-| BRP v4 with Deflate on top | 61.6% | 13 MiB/s | 50 MiB/s |
-| `raw+deflate` | 66.9% | 30 MiB/s | 196 MiB/s |
-| BRP v3 (prediction, fixed width) | 74.4% | 37 MiB/s | 120 MiB/s |
-| BRP v2 (no prediction) | 77.8% | 209 MiB/s | 254 MiB/s |
+| **BRP v4, default settings** | **62.5%** | 27 MiB/s | 60 MiB/s |
+| BRP v4 with Deflate on top | 61.6% | 18 MiB/s | 52 MiB/s |
+| `raw+deflate` | 66.9% | 30 MiB/s | 192 MiB/s |
+| BRP v3 configuration (prediction, fixed width) | 74.4% | 55 MiB/s | 142 MiB/s |
+| BRP v2 configuration (no prediction) | 77.8% | 204 MiB/s | 241 MiB/s |
 
 Against real encoders on the same photographs: the `image` crate's PNG output is 67.5%, WebP
 lossless 49.9%. So BRP now beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
@@ -67,8 +67,9 @@ Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md
 - **Four plausible improvements measured worse and were dropped**: per-channel predictor choice,
   optimising the largest residual rather than their sum, patched frame-of-reference, and a
   per-block choice between fixed width and Rice.
-- **Speed is the cost.** Every stage added has spent throughput: 209 MiB/s encode at v2, 17 at v4.
-  Most of that is the unary loop, not the algorithm, and it is the next thing to fix.
+- **Speed is the cost, and the roadmap guessed wrong about where it went.** Prediction turned out
+  to cost more encode throughput than Rice did. Fixing what the measurements actually pointed at
+  bought 1.6-1.9x on encode with no change to a single output bit. Decode is now the weak side.
 
 ## Build and use
 
