@@ -51,8 +51,9 @@ first.
 ### 2. Adaptive block size
 
 `quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure
-is now stale: the model assumed fixed-width packing, and has to be rewritten around Rice's cost
-before it means anything. Re-measure before implementing.
+is now stale twice over: the model assumed fixed-width packing and has to be rewritten around
+Rice's cost, and the fixed grid it has to beat is no longer 8x8 — a 16x16 grid is 0.8 points
+better on the current corpus (finding 11). Re-measure before implementing.
 
 ### 3. Better predictors
 

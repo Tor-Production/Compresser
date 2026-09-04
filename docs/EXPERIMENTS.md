@@ -307,6 +307,40 @@ Two details in the implementation earned their place:
 Note for the next reader of this file: the plain block-packing rows are *not* controls for a
 change to `BitReader` — they are its purest measurement. Only the encoder rows control it.
 
+### 11. The best fixed block size is 16x16, not 8x8
+
+Every table above quotes 8x8. It was chosen early and never re-examined after Rice landed. On the
+eight photographs, with prediction and coder both on `Auto`, the full sweep disagrees:
+
+| Block | whole | 64x64 | 32x32 | 16x16 | 8x8 | 4x4 |
+|---|---:|---:|---:|---:|---:|---:|
+| Of raw | 63.2% | 60.8% | 60.2% | **59.9%** | 60.7% | 65.9% |
+
+16x16 wins on seven images of eight; `kodim05` prefers 8x8 by a tenth of a point. The corpus
+figures are unweighted means, which is exact here — every image is the same 768x512x3.
+
+The interesting part is the shape of that curve, not the winner. A block header costs a base plus
+a mode field, 8 + 4 bits per block per coded channel, so smaller blocks buy adaptivity and pay for
+it in headers:
+
+| Block | Header, bits/sample | Of raw |
+|---|---:|---:|
+| 4x4 | 0.75 | 9.4% |
+| 8x8 | 0.19 | 2.3% |
+| 16x16 | 0.05 | 0.6% |
+| 32x32 | 0.01 | 0.1% |
+
+Going from 8x8 to 16x16 hands back 1.75 points of header, and measured 0.81. So the payload got
+0.94 points *worse*: a 256-sample block is more heterogeneous than a 64-sample one, and a single
+Rice parameter fits it less well. That is the argument for context modelling stated as one number.
+If `k` came from local gradients instead of a per-block field, the header saving of the larger
+block would be available without the payload penalty — and the block-size question would lose most
+of its force, which is why the roadmap puts context modelling first.
+
+Nothing was changed on the strength of this. The default block size is still the whole image and
+the documented configuration is still 8x8, so every other figure on this page stays comparable.
+Moving the documented grid to 16x16 belongs with the next format change, not before it.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the
