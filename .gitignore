@@ -9,5 +9,10 @@ proptest-regressions/
 #   pwsh scripts/fetch-photos.ps1
 /samples/*.png
 /samples/*.webp
+/samples/*.jpg
+/samples/*.jpeg
 /samples/*.brp
 /samples/out/
+# Large images are opt-in and measured separately; only the note explaining that is committed.
+/samples/large/*
+!/samples/large/README.md

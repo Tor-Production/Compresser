@@ -127,6 +127,11 @@ fn to_dynamic(raw: &RawImage) -> Result<DynamicImage> {
 }
 
 /// True if the path's extension names an image format this build can read.
+///
+/// Lossless inputs only, and deliberately: a JPEG source is not a neutral measurement subject.
+/// Its high frequencies have already been quantised away and it carries 8x8 DCT blocking, so every
+/// lossless codec scores far better on it than on the photograph it came from. Refusing to load
+/// one keeps a stray file from quietly rewriting a corpus figure.
 pub fn is_supported_image(path: &Path) -> bool {
     matches!(
         ImageFormat::from_path(path),
@@ -168,6 +173,7 @@ mod tests {
     fn recognizes_supported_extensions() {
         assert!(is_supported_image(Path::new("a.png")));
         assert!(is_supported_image(Path::new("a.webp")));
+        assert!(!is_supported_image(Path::new("a.jpg")), "lossy sources are refused");
         assert!(!is_supported_image(Path::new("a.brp")));
         assert!(!is_supported_image(Path::new("a.txt")));
     }
