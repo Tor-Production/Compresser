@@ -1,6 +1,7 @@
 # ADR 0004 — Version-independent magic
 
-**Status:** accepted (2026-09-03)
+**Status:** accepted (2026-09-03). The principle stands; the byte values were superseded by
+ADR 0008, which renamed the format. This document is left as it was written.
 
 ## Context
 

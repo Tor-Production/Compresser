@@ -58,4 +58,4 @@ foreach ($n in $Images) {
 
 Write-Host ""
 Write-Host "$downloaded downloaded, $skipped already present, in $Destination"
-Write-Host "Now run:  cargo run -p brp-lab --release -- $Destination"
+Write-Host "Now run:  cargo run -p cim-lab --release -- $Destination"
