@@ -21,7 +21,7 @@ pwsh scripts/fetch-photos.ps1 -Destination samples -Images 1,5,13
 [CmdletBinding()]
 param(
     [string]$Destination = "samples",
-    [int[]]$Images = @(1, 5, 7, 13, 19, 23)
+    [int[]]$Images = @(1, 4, 5, 7, 9, 13, 19, 23)
 )
 
 $ErrorActionPreference = "Stop"

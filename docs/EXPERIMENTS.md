@@ -21,8 +21,18 @@ Two, and the difference between them is the most important thing on this page.
 
 - **Synthetic** — 17 generated images: solid colours, gradients, text pages, screenshots, noise,
   grayscale carried in RGB. Built to bracket the algorithm's behaviour.
-- **Photographs** — 6 images from the Kodak True Color Suite, the set lossless-codec papers
-  benchmark against.
+- **Photographs** — 8 images from the Kodak True Color Suite, the set lossless-codec papers
+  benchmark against. Six came first; `kodim04` (a portrait — skin and satin behind the fine mesh
+  of a hat) and `kodim09` (sailboats — sky, sail cloth and water) were added afterwards, because
+  the original six skew high-frequency and left large smooth regions under-represented. Those are
+  the gradient statistics the next roadmap item will be judged on.
+
+Widening a corpus invalidates comparisons across it, so nothing measured earlier was restated
+against the new one. **The two tables below, and the version progression further down, are on the
+original six photographs.** On the current eight (9.0 MiB raw) the shipped configuration measures
+60.7% of raw against `filter+deflate`'s 57.5% — a 3.2-point gap where the six gave 3.3, which is
+the useful check: the two extra images changed the absolute numbers and left the conclusion
+alone.
 
 ## Results on photographs (6.8 MiB raw)
 
@@ -278,8 +288,9 @@ Decode, 512x512, at 8x8 blocks:
 The encoder does not touch the reader, so its six configurations are the control: they moved
 -1.6% to +2.6%, twice, which bounds the noise on this machine well below the effect.
 
-End to end on the photographs the shipped configuration went from 60 MiB/s to **89** on decode,
-with encode unchanged at 27 and output byte-identical at 62.5%. `filter+deflate`, which shares no
+End to end on the photographs (the original six, both sides of the comparison) the shipped
+configuration went from 60 MiB/s to **89** on decode, with encode unchanged at 27 and output
+byte-identical at 62.5%. `filter+deflate`, which shares no
 code with the reader, measured 105 MiB/s against a recorded 103 — so the decode gap to PNG's
 approach is 16 points rather than 43.
 
@@ -314,8 +325,9 @@ cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
 2. ~~Replace fixed-width block packing with Golomb-Rice.~~ Done, version 4.
 3. ~~Make Rice fast.~~ Done: encode 1.6-1.9x (finding 9), decode 1.2-1.9x (finding 10), neither
-   changing an output bit. On the photographs the shipped configuration now measures 27 MiB/s
-   encoding and 89 decoding, against `filter+deflate`'s 10 and 105.
+   changing an output bit. On the six-photograph corpus the shipped configuration measures
+   27 MiB/s encoding and 89 decoding, against `filter+deflate`'s 10 and 105; on the current eight,
+   24 and 80 against 9 and 96.
 4. **Context modelling for the Rice parameter.** This is where JPEG-LS gets its remaining edge:
    choose `k` from quantised local gradients rather than per block, so the model adapts within a
    block instead of across it.

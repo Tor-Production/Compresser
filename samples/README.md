@@ -15,8 +15,8 @@ and low-contrast content between.
 
     pwsh scripts/fetch-photos.ps1
 
-Downloads six images from the Kodak True Color Suite, the corpus lossless-codec papers benchmark
-against. Roughly 4 MB.
+Downloads eight images from the Kodak True Color Suite, the corpus lossless-codec papers benchmark
+against. Roughly 5 MB.
 
 ## Why both
 

@@ -39,20 +39,20 @@ Prediction and coder both default to `Auto`: the encoder measures rather than gu
 
 ### What the measurements say
 
-On six Kodak photographs (6.8 MiB raw), 8x8 blocks:
+On eight Kodak photographs (9.0 MiB raw), 8x8 blocks:
 
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
-| `filter+deflate` — a tuned PNG-style pipeline | **59.2%** | 10 MiB/s | 105 MiB/s |
-| **BRP v4, default settings** | **62.5%** | 27 MiB/s | 89 MiB/s |
-| BRP v4 with Deflate on top | 61.6% | 18 MiB/s | 75 MiB/s |
-| `raw+deflate` | 66.9% | 30 MiB/s | 190 MiB/s |
-| BRP v3 configuration (prediction, fixed width) | 74.4% | 56 MiB/s | 184 MiB/s |
-| BRP v2 configuration (no prediction) | 77.8% | 214 MiB/s | 477 MiB/s |
+| `filter+deflate` — a tuned PNG-style pipeline | **57.5%** | 9 MiB/s | 96 MiB/s |
+| **BRP v4, default settings** | **60.7%** | 24 MiB/s | 80 MiB/s |
+| BRP v4 with Deflate on top | 59.7% | 17 MiB/s | 66 MiB/s |
+| `raw+deflate` | 64.4% | 27 MiB/s | 174 MiB/s |
+| BRP v3 configuration (prediction, fixed width) | 72.3% | 50 MiB/s | 161 MiB/s |
+| BRP v2 configuration (no prediction) | 75.5% | 188 MiB/s | 422 MiB/s |
 
-Against real encoders on the same photographs: the `image` crate's PNG output is 67.5%, WebP
-lossless 49.9%. So BRP now beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
-pipeline by 3.3 points, and trails WebP by more.
+Against real encoders on the same photographs: the `image` crate's PNG output is 65.1%, WebP
+lossless 48.6%. So BRP beats that PNG encoder, still trails a well-tuned filter-plus-Deflate
+pipeline by 3.2 points, and trails WebP by more.
 
 Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
 
