@@ -10,6 +10,16 @@
 //! several sizes. Content still varies — a larger crop takes in more of the scene — but far less
 //! than between two photographs.
 //!
+//! Two defences against the machine, added after a single run produced a clean monotone trend that
+//! the next run did not reproduce:
+//!
+//! - **Rounds are interleaved.** Every crop is timed once per round rather than to exhaustion in
+//!   turn, so drift and thermal throttling land on all of them alike instead of on whichever crop
+//!   happened to run last.
+//! - **The best round wins, and the spread is printed.** Interference can only make a run slower,
+//!   so the fastest round is the closest estimate of the true rate. Read the spread column first:
+//!   a difference between crops smaller than the spread within a crop is not a result.
+//!
 //! Usage: `cargo run -p brp-bench --release --bin cache-scale -- samples/large/some.png`
 
 use anyhow::{bail, Context, Result};
@@ -21,7 +31,10 @@ use std::time::{Duration, Instant};
 const EDGES: [u32; 5] = [768, 1536, 3072, 6144, u32::MAX];
 
 /// Keep timing until this much has elapsed, so a fast small crop is not one clock tick.
-const MIN_TIME: Duration = Duration::from_millis(1500);
+const MIN_TIME: Duration = Duration::from_millis(1200);
+
+/// Interleaved timing rounds. The best round per crop is reported, the spread alongside it.
+const ROUNDS: usize = 3;
 
 fn opts() -> EncodeOptions {
     EncodeOptions {
@@ -71,6 +84,13 @@ fn rate(bytes: usize, mut f: impl FnMut()) -> f64 {
     (bytes as f64 * runs as f64) / secs / (1024.0 * 1024.0)
 }
 
+/// Best rate over the rounds, and how far the worst round fell below it, in percent.
+fn summarise(rates: &[f64]) -> (f64, f64) {
+    let best = rates.iter().copied().fold(f64::MIN, f64::max);
+    let worst = rates.iter().copied().fold(f64::MAX, f64::min);
+    (best, 100.0 * (best - worst) / best)
+}
+
 fn main() -> Result<()> {
     let path: PathBuf = std::env::args()
         .nth(1)
@@ -95,41 +115,63 @@ fn main() -> Result<()> {
         img.channels()
     );
     println!(
-        "{:>12} {:>12} {:>9} {:>12} {:>12}",
+        "{:>12} {:>12} {:>9} {:>19} {:>19}",
         "crop", "raw", "of raw", "encode", "decode"
     );
-    println!("{:-<62}", "");
+    println!("{:-<76}", "");
 
+    // Prepare every crop first, so the timed loop below does no allocation between rounds.
+    let mut tiles = Vec::new();
     for edge in EDGES {
         let tile = crop(&img, edge);
-        let raw = tile.data().len();
         let bytes = encode(&tile, &opts()).map_err(|e| anyhow::anyhow!(e))?;
         let back = decode(&bytes).map_err(|e| anyhow::anyhow!(e))?;
         if back != tile {
             bail!("round trip failed at {}x{}", tile.width(), tile.height());
         }
+        tiles.push((tile, bytes));
+    }
 
-        let enc = rate(raw, || {
-            let _ = encode(&tile, &opts());
-        });
-        let dec = rate(raw, || {
-            let _ = decode(&bytes);
-        });
+    // Interleaved: one round touches every crop, so drift is shared rather than assigned.
+    let mut enc = vec![Vec::new(); tiles.len()];
+    let mut dec = vec![Vec::new(); tiles.len()];
+    for _ in 0..ROUNDS {
+        for (i, (tile, bytes)) in tiles.iter().enumerate() {
+            let raw = tile.data().len();
+            enc[i].push(rate(raw, || {
+                let _ = encode(tile, &opts());
+            }));
+            dec[i].push(rate(raw, || {
+                let _ = decode(bytes);
+            }));
+        }
+    }
 
+    for (i, (tile, bytes)) in tiles.iter().enumerate() {
+        let raw = tile.data().len();
+        let (e, e_spread) = summarise(&enc[i]);
+        let (d, d_spread) = summarise(&dec[i]);
         println!(
-            "{:>12} {:>12} {:>8.1}% {:>8.0} MiB/s {:>8.0} MiB/s",
+            "{:>12} {:>12} {:>8.1}% {:>8.0} MiB/s ±{:<3.0}% {:>8.0} MiB/s ±{:<3.0}%",
             format!("{}x{}", tile.width(), tile.height()),
             human(raw),
             100.0 * bytes.len() as f64 / raw as f64,
-            enc,
-            dec,
+            e,
+            e_spread,
+            d,
+            d_spread,
         );
     }
 
     println!(
-        "\nSame pixels, nested about the centre, so the ratio column shows how much of any \
-         throughput\nchange is content rather than size."
+        "
+Same pixels, nested about the centre, so the ratio column shows how much of any"
     );
+    println!("throughput change is content rather than size.");
+    println!(
+        "Best of {ROUNDS} interleaved rounds; the spread is how far the worst round fell short."
+    );
+    println!("A gap between crops smaller than the spread within a crop is not a result.");
     Ok(())
 }
 

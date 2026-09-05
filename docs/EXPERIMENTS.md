@@ -366,43 +366,65 @@ Nothing was changed on the strength of this. The default block size is still the
 the documented configuration is still 8x8, so every other figure on this page stays comparable.
 Moving the documented grid to 16x16 belongs with the next format change, not before it.
 
-### 12. Throughput barely depends on whether the image fits in cache
+### 12. Leaving the cache costs nothing measurable
 
-Every throughput figure on this page was measured on 768x512 images: 1.1 MiB of samples, which sits
-in L2/L3. That is a weak basis for calling speed this codec's advantage, since a real photograph is
-fifty times larger and no cache holds it.
+Every other throughput figure on this page was measured on 768x512 images: 1.1 MiB of samples,
+which sits in L2/L3. That is a weak basis for calling speed this codec's advantage, since a real
+photograph is fifty times larger and no cache holds it.
 
 Comparing a large image against a small one cannot settle it — size and content move together, and
 content decides the ratio, which decides how many bits the coder has to move. So `cache-scale`
 crops one 45-megapixel photograph into nested tiles about the same centre and measures the same
-pixels at five sizes, with prediction and coder on `Auto` at 16x16:
+pixels at five sizes, prediction and coder on `Auto` at 16x16:
 
 | Crop | Raw | Of raw | Encode | Decode |
 |---|---:|---:|---:|---:|
-| 768x511 | 1.1 MiB | 31.4% | 27 MiB/s | 84 MiB/s |
-| 1536x1023 | 4.5 MiB | 32.5% | 27 MiB/s | 82 MiB/s |
-| 3072x2046 | 18.0 MiB | 32.8% | 23 MiB/s | 77 MiB/s |
-| 6144x4092 | 71.9 MiB | 33.0% | 23 MiB/s | 77 MiB/s |
-| 8288x5520 | 130.9 MiB | 32.1% | 22 MiB/s | 80 MiB/s |
+| 768x511 | 1.1 MiB | 31.4% | 27 MiB/s ±3% | 85 MiB/s ±3% |
+| 1536x1023 | 4.5 MiB | 32.5% | 27 MiB/s ±3% | 83 MiB/s ±2% |
+| 3072x2046 | 18.0 MiB | 32.8% | 27 MiB/s ±3% | 87 MiB/s ±1% |
+| 6144x4092 | 71.9 MiB | 33.0% | 27 MiB/s ±0% | 89 MiB/s ±2% |
+| 8288x5520 | 130.9 MiB | 32.1% | 28 MiB/s ±1% | 92 MiB/s ±3% |
 
-The ratio column is the control. It moves 1.6 points across a 120-fold increase in size, so the
-tiles are the same kind of content and the throughput column is measuring size alone.
+The ratio column is the content control: it moves 1.6 points across a 120-fold increase in size, so
+the tiles are the same kind of content and the throughput columns are measuring size alone. The
+spread is the machine control: best of three interleaved rounds, with the figure after ± showing
+how far the worst round fell short.
 
-Encode loses 19%, decode 5%. There is a cache effect and it is small. Both directions walk the
-image once in raster order, which is the pattern a prefetcher handles best, and neither indexes
-randomly. Encode loses more because it walks the data more times per byte: five predictors, nine
-Rice parameters and both coders are all costed before anything is written.
+Encode is flat. Decode drifts *upward* by about 8% at the largest size, which is at the edge of the
+spread and in the opposite direction to the one the question anticipated; the plausible cause is
+per-image fixed cost — header, allocation, the row-predictor array — amortising over more pixels.
 
-Two caveats. This is one photograph, and it is a 16-bit source measured at 8, so the sensor noise
-below the eighth bit is not in it. What the numbers support is the narrow claim they were made
-for — that throughput does not collapse when the working set stops fitting in cache — and not
-anything about ratio.
+Both directions walk the image once in raster order, which is the access pattern a prefetcher
+handles best, and neither indexes randomly, so there is no working set to overflow. The claim that
+speed is this codec's advantage survives contact with a 45-megapixel photograph.
 
-On ratio that image is worth one line, as a single measurement rather than a result: 31.9% at
-32x32, against PNG's 36.6% and WebP's 42.2%. It is the first image on which this codec has beaten
-both, and the first on which WebP has lost to PNG. A 45-megapixel landscape is smooth at pixel
-scale in a way a 768x512 crop is not, which flatters a predictor; the optimum block size lands at
-32x32 here against 16x16 on the small photographs for the same reason.
+#### The first version of this finding was wrong
+
+It reported encode losing 19% and decode 5% with size, from a table that looked convincingly
+monotone. It came from a tool that timed each crop to exhaustion in turn, and a second run did not
+reproduce it: the same crops came back scattered, with the largest sometimes fastest. Run-to-run
+variation on one crop reached 15%, which is the size of the effect that had been claimed.
+
+Two changes made the answer stable. Rounds are now interleaved, so drift and thermal throttling
+land on every crop alike instead of on whichever ran last, and each crop reports the best of its
+rounds with the spread beside it, since interference can only ever make a run slower. The spread
+column exists to be read before the throughput column.
+
+This is the same lesson as the note at the end of finding 9, arriving from a new direction: a
+single run that agrees with the hypothesis is not evidence, and a benchmark without a control on
+the machine is not a benchmark.
+
+#### About the image
+
+One photograph, 8288x5520, and an 8-bit rendition of a 16-bit capture — so the sensor noise living
+below the eighth bit is not in it, which makes it easier than a native 8-bit frame by an unmeasured
+amount. What the table supports is the narrow claim it was built for, and nothing about ratio.
+
+On ratio it gets one line, as a measurement rather than a result: 31.9% at 32x32, against PNG's
+36.6% and lossless WebP's 42.2%. It is the first image this codec has beaten both on, and the first
+on which WebP has lost to PNG. A 45-megapixel landscape is smooth at pixel scale in a way a 768x512
+crop is not, which flatters a predictor; the optimum block size lands at 32x32 here against 16x16
+on the small photographs for the same reason.
 
 ## Adopted into the format
 

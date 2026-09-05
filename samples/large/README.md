@@ -32,16 +32,16 @@ the shadows is the hard case and the interesting one.
 
 ## What is measured here now
 
-An 8288x5520 16-bit RGB PNG exported from a camera raw — 45.7 megapixels, 262 MiB of 16-bit
-samples. It is not committed; put your own copy here to reproduce the figures below.
+An 8288x5520 8-bit RGB PNG — 45.7 megapixels, 130.9 MiB of samples — rendered down from a 16-bit
+camera-raw export. It is not committed; put your own copy here to reproduce the figures below.
 
 Two things about it are worth stating before quoting any number from it.
 
-**It is measured at 8 bits.** The format stores 8 bits per sample, so the loader narrows the file
-and both tools now say so on stderr. The raw figure is therefore 130.9 MiB, not 262, and the low
-byte of every sample — which is where the sensor noise that survives 16 bits lives — is not part
-of the measurement. This makes the image easier than a native 8-bit capture of the same scene by
-an unmeasured amount.
+**It is an 8-bit rendition of a 16-bit capture.** The low byte of every sample, where the sensor
+noise that survives 16 bits lives, is not in it. That makes the image easier than a native 8-bit
+frame of the same scene by an unmeasured amount. The 16-bit original was measured first, and the
+8-bit file reproduces every column of that run to the decimal — so the loader's narrowing is exactly
+this rendition, and no measurement here depends on which of the two files is present.
 
 **It is one image.** Nothing here is a corpus result.
 
