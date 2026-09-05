@@ -366,6 +366,44 @@ Nothing was changed on the strength of this. The default block size is still the
 the documented configuration is still 8x8, so every other figure on this page stays comparable.
 Moving the documented grid to 16x16 belongs with the next format change, not before it.
 
+### 12. Throughput barely depends on whether the image fits in cache
+
+Every throughput figure on this page was measured on 768x512 images: 1.1 MiB of samples, which sits
+in L2/L3. That is a weak basis for calling speed this codec's advantage, since a real photograph is
+fifty times larger and no cache holds it.
+
+Comparing a large image against a small one cannot settle it — size and content move together, and
+content decides the ratio, which decides how many bits the coder has to move. So `cache-scale`
+crops one 45-megapixel photograph into nested tiles about the same centre and measures the same
+pixels at five sizes, with prediction and coder on `Auto` at 16x16:
+
+| Crop | Raw | Of raw | Encode | Decode |
+|---|---:|---:|---:|---:|
+| 768x511 | 1.1 MiB | 31.4% | 27 MiB/s | 84 MiB/s |
+| 1536x1023 | 4.5 MiB | 32.5% | 27 MiB/s | 82 MiB/s |
+| 3072x2046 | 18.0 MiB | 32.8% | 23 MiB/s | 77 MiB/s |
+| 6144x4092 | 71.9 MiB | 33.0% | 23 MiB/s | 77 MiB/s |
+| 8288x5520 | 130.9 MiB | 32.1% | 22 MiB/s | 80 MiB/s |
+
+The ratio column is the control. It moves 1.6 points across a 120-fold increase in size, so the
+tiles are the same kind of content and the throughput column is measuring size alone.
+
+Encode loses 19%, decode 5%. There is a cache effect and it is small. Both directions walk the
+image once in raster order, which is the pattern a prefetcher handles best, and neither indexes
+randomly. Encode loses more because it walks the data more times per byte: five predictors, nine
+Rice parameters and both coders are all costed before anything is written.
+
+Two caveats. This is one photograph, and it is a 16-bit source measured at 8, so the sensor noise
+below the eighth bit is not in it. What the numbers support is the narrow claim they were made
+for — that throughput does not collapse when the working set stops fitting in cache — and not
+anything about ratio.
+
+On ratio that image is worth one line, as a single measurement rather than a result: 31.9% at
+32x32, against PNG's 36.6% and WebP's 42.2%. It is the first image on which this codec has beaten
+both, and the first on which WebP has lost to PNG. A 45-megapixel landscape is smooth at pixel
+scale in a way a 768x512 crop is not, which flatters a predictor; the optimum block size lands at
+32x32 here against 16x16 on the small photographs for the same reason.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the

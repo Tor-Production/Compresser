@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Extra binaries exist for one-off studies; `cargo run -p brp-bench` means the ratio benchmark.
+default-run = "brp-bench"
 
 [dependencies]
 brp-core = { workspace = true }

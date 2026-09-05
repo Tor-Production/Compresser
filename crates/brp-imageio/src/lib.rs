@@ -173,7 +173,10 @@ mod tests {
     fn recognizes_supported_extensions() {
         assert!(is_supported_image(Path::new("a.png")));
         assert!(is_supported_image(Path::new("a.webp")));
-        assert!(!is_supported_image(Path::new("a.jpg")), "lossy sources are refused");
+        assert!(
+            !is_supported_image(Path::new("a.jpg")),
+            "lossy sources are refused"
+        );
         assert!(!is_supported_image(Path::new("a.brp")));
         assert!(!is_supported_image(Path::new("a.txt")));
     }

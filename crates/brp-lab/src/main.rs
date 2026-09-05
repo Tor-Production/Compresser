@@ -51,6 +51,12 @@ fn main() -> Result<()> {
     let mut raw_total = 0usize;
     for p in &paths {
         let loaded = brp_imageio::load(p)?;
+        if loaded.narrowed {
+            eprintln!(
+                "note: {} has more than 8 bits per sample; measured at 8, what the format stores",
+                p.display()
+            );
+        }
         raw_total += loaded.image.data().len();
         images.push((
             p.file_name()

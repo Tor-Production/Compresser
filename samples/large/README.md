@@ -29,3 +29,28 @@ photographs. The same goes for anything that has been through a lossy step at an
 What is wanted is a large image that has never been lossily compressed: a camera raw exported
 straight to PNG or TIFF, or a lossless source such as the Xiph.org test media. Real sensor noise in
 the shadows is the hard case and the interesting one.
+
+## What is measured here now
+
+An 8288x5520 16-bit RGB PNG exported from a camera raw — 45.7 megapixels, 262 MiB of 16-bit
+samples. It is not committed; put your own copy here to reproduce the figures below.
+
+Two things about it are worth stating before quoting any number from it.
+
+**It is measured at 8 bits.** The format stores 8 bits per sample, so the loader narrows the file
+and both tools now say so on stderr. The raw figure is therefore 130.9 MiB, not 262, and the low
+byte of every sample — which is where the sensor noise that survives 16 bits lives — is not part
+of the measurement. This makes the image easier than a native 8-bit capture of the same scene by
+an unmeasured amount.
+
+**It is one image.** Nothing here is a corpus result.
+
+    raw 130.9 MiB   png 36.6%   webp lossless 42.2%   brp 31.9% @32x32
+
+That is the first image on which BRP has beaten both PNG and WebP, and the first on which WebP
+loses to PNG. Neither is a general claim: a 45-megapixel landscape is smooth at pixel scale in a
+way a 768x512 crop is not, which flatters a predictor. The optimum block size lands at 32x32 here
+against 16x16 on the small photographs, for the same reason.
+
+The file is also the obvious first test subject for the roadmap's 16-bit item, since it is a real
+16-bit source rather than a synthetic one.

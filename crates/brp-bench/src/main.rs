@@ -65,6 +65,13 @@ fn main() -> Result<()> {
 
 fn measure(path: &Path) -> Result<Row> {
     let loaded = brp_imageio::load(path)?;
+    if loaded.narrowed {
+        // Silence here would mean reporting a ratio for an image nobody chose to measure.
+        eprintln!(
+            "note: {} has more than 8 bits per sample; measured at 8, what the format stores",
+            path.display()
+        );
+    }
     let img = loaded.image;
     let raw = img.data().len();
 
