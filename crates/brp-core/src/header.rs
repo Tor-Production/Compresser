@@ -13,7 +13,7 @@ pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
 pub const VERSION: u8 = 6;
 
-/// The only bit depth version 5 defines.
+/// The only bit depth version 6 defines.
 pub const BIT_DEPTH: u8 = 8;
 
 /// Width of the per-block parameter field: a width code under [`BLOCK_CODER_FIXED`], a Rice mode

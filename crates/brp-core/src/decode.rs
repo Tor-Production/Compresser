@@ -39,14 +39,14 @@ impl Default for DecodeOptions {
     }
 }
 
-/// Decodes a BRP v5 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
+/// Decodes a BRP v6 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
 ///
 /// Returns an error for any malformed input; never panics.
 pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     decode_with(bytes, &DecodeOptions::default())
 }
 
-/// Decodes a BRP v5 bitstream with an explicit resource limit.
+/// Decodes a BRP v6 bitstream with an explicit resource limit.
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
     let (header, header_len) = Header::parse(bytes)?;
     let stride = usize::from(header.channels);
