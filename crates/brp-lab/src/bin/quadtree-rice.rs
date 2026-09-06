@@ -1,18 +1,19 @@
-//! Is adaptive block splitting worth anything *now*, under the Rice coder?
+//! What adaptive partitioning is worth, priced in the bits version 6 would really spend.
 //!
 //! Finding 4 measured a quadtree beating a fixed 8x8 grid by 4 points, with an exact cost model,
 //! and that number has been stale since version 4: the model priced fixed-width packing, where a
 //! block's cost is set by its worst sample and splitting away an outlier pays immediately. Rice
 //! charges each sample for itself, so the thing splitting was buying is largely already bought.
 //!
-//! This measures the ceiling rather than an implementation. For every node of the pyramid it
-//! computes the *exact* bits version 6 would spend on that block under `block_coder` 1 — an 8-bit
-//! base and a 4-bit mode per coded channel, then Golomb-Rice at the best parameter — and takes,
-//! bottom up, the cheaper of coding the node whole or coding its four children plus one split-flag
-//! bit. Nothing heuristic is involved, so no better quadtree exists at this leaf size.
+//! Four partitionings, all costed identically (see [`brp_lab::grid`]):
 //!
-//! What it prints is that ceiling against uniform grids costed the same way, which is the only
-//! comparison that means anything: the difference is adaptation and nothing else.
+//! - **uniform** grids, 8x8 through 64x64 and the whole image;
+//! - **quadtree**, the full bottom-up ceiling at an 8x8 leaf — no better tree exists;
+//! - **32/64 tree**, one bit per 32x32 block for "split to 16x16?" and a second bit at each 64x64
+//!   corner for "merge to 64x64?". Two decisions, no recursion, three sizes;
+//! - **auto**, the cheapest uniform grid, chosen by a prescan that costs every candidate exactly.
+//!
+//! The last two are proposals rather than ceilings: they are what a format could actually carry.
 //!
 //! Prediction is pinned to the per-8x8-block layout of version 6 and is independent of the stage 2
 //! grid, so it is the same residual plane in every column.
@@ -20,161 +21,83 @@
 //! Usage: `cargo run -p brp-lab --release --bin quadtree-rice -- samples/`
 
 use anyhow::{bail, Context, Result};
-use brp_core::{
-    apply_prediction, plan_channels, ChannelOptions, CodedIndices, FilterLayout, RawImage,
-};
-use brp_lab::blockpack::rice_payload_bits;
+use brp_core::{apply_prediction, plan_channels, ChannelOptions, FilterLayout, RawImage};
+use brp_lab::grid::{Leaves, Plane};
 use std::path::PathBuf;
+use std::time::Instant;
 
-/// The smallest leaf. Below this every sweep so far has the per-block fields outgrowing the gain.
+/// The grids the prescan may choose between. `u32::MAX` stands for the whole image.
+const CANDIDATES: [u32; 5] = [8, 16, 32, 64, u32::MAX];
+/// The grids reported as columns.
+const GRIDS: [u32; 4] = [8, 16, 32, 64];
 const LEAF: u32 = 8;
-/// An 8-bit base and a 4-bit mode, per block per coded channel — `FORMAT.md` section 8.
-const BLOCK_HEADER_BITS: u64 = 12;
-/// One bit per node that could have been split and was not, or was.
-const SPLIT_FLAG_BITS: u64 = 1;
-
-struct Plane<'a> {
-    data: &'a [u8],
-    width: u32,
-    height: u32,
-    stride: usize,
-    coded: &'a CodedIndices,
-}
-
-impl Plane<'_> {
-    /// Exact bits `block_coder` 1 spends on one rectangle: per coded channel, a base, a mode, and
-    /// the Rice payload at the parameter the encoder would choose.
-    fn block_bits(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> u64 {
-        let mut bits = 0;
-        let mut values: Vec<u32> = Vec::with_capacity(((x1 - x0) * (y1 - y0)) as usize);
-        for slot in 0..self.coded.len() {
-            let c = self.coded.channel(slot);
-            values.clear();
-            let mut min = u8::MAX;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let v = self.data[(y as usize * self.width as usize + x as usize) * self.stride
-                        + c];
-                    min = min.min(v);
-                    values.push(u32::from(v));
-                }
-            }
-            for v in values.iter_mut() {
-                *v -= u32::from(min);
-            }
-            bits += BLOCK_HEADER_BITS + rice_payload_bits(&values);
-        }
-        bits
-    }
-
-    /// The cheaper of coding this node whole or splitting it, plus the flag that says which.
-    ///
-    /// Nodes at the leaf size carry no flag: both sides derive from the geometry that they cannot
-    /// split. Nodes entirely outside the image cost nothing and carry no flag either.
-    fn quadtree_bits(&self, x0: u32, y0: u32, size: u32) -> u64 {
-        let (x1, y1) = ((x0 + size).min(self.width), (y0 + size).min(self.height));
-        if x0 >= self.width || y0 >= self.height {
-            return 0;
-        }
-        let whole = self.block_bits(x0, y0, x1, y1);
-        if size <= LEAF {
-            return whole;
-        }
-        let half = size / 2;
-        let split: u64 = [(0, 0), (half, 0), (0, half), (half, half)]
-            .into_iter()
-            .map(|(dx, dy)| self.quadtree_bits(x0 + dx, y0 + dy, half))
-            .sum();
-        SPLIT_FLAG_BITS + whole.min(split)
-    }
-
-    /// Every block of a uniform grid, costed the same way. No flags: the geometry is the header.
-    fn uniform_bits(&self, block: u32) -> u64 {
-        let mut bits = 0;
-        let mut y = 0;
-        while y < self.height {
-            let mut x = 0;
-            while x < self.width {
-                bits += self.block_bits(
-                    x,
-                    y,
-                    (x + block).min(self.width),
-                    (y + block).min(self.height),
-                );
-                x += block;
-            }
-            y += block;
-        }
-        bits
-    }
-
-    /// How many leaves a quadtree would actually stop at, per level, and how many nodes it holds.
-    fn shape(&self, x0: u32, y0: u32, size: u32, leaves: &mut Vec<(u32, u64)>) -> u64 {
-        let (x1, y1) = ((x0 + size).min(self.width), (y0 + size).min(self.height));
-        if x0 >= self.width || y0 >= self.height {
-            return 0;
-        }
-        let whole = self.block_bits(x0, y0, x1, y1);
-        if size <= LEAF {
-            record(leaves, size);
-            return whole;
-        }
-        let half = size / 2;
-        let mut children = Vec::new();
-        let split: u64 = [(0, 0), (half, 0), (0, half), (half, half)]
-            .into_iter()
-            .map(|(dx, dy)| self.shape(x0 + dx, y0 + dy, half, &mut children))
-            .sum();
-        if whole <= split {
-            record(leaves, size);
-            SPLIT_FLAG_BITS + whole
-        } else {
-            merge(leaves, &children);
-            SPLIT_FLAG_BITS + split
-        }
-    }
-}
-
-fn record(leaves: &mut Vec<(u32, u64)>, size: u32) {
-    add(leaves, size, 1);
-}
-
-fn merge(leaves: &mut Vec<(u32, u64)>, from: &[(u32, u64)]) {
-    for &(size, n) in from {
-        add(leaves, size, n);
-    }
-}
-
-fn add(leaves: &mut Vec<(u32, u64)>, size: u32, n: u64) {
-    match leaves.iter_mut().find(|(s, _)| *s == size) {
-        Some((_, total)) => *total += n,
-        None => leaves.push((size, n)),
-    }
-}
-
-/// The root of a quadtree over this image: the smallest power of two covering both dimensions.
-fn root_size(w: u32, h: u32) -> u32 {
-    let mut size = LEAF;
-    while size < w || size < h {
-        size *= 2;
-    }
-    size
-}
 
 struct Row {
     name: String,
     photo: bool,
     raw: usize,
-    quadtree: u64,
     uniform: Vec<(u32, u64)>,
-    leaves: Vec<(u32, u64)>,
+    whole: u64,
+    quadtree: u64,
+    quadtree_leaves: Leaves,
+    tree_32_64: u64,
+    tree_leaves: Leaves,
+    auto_grid: u32,
+    auto_bits: u64,
+    ternary_grid: u32,
+    prescan_ms: f64,
+    one_grid_ms: f64,
 }
 
 fn percent(bits: u64, raw: usize) -> f64 {
     100.0 * (bits as f64 / 8.0) / raw as f64
 }
 
-const GRIDS: [u32; 4] = [8, 16, 32, 64];
+fn grid_name(g: u32) -> String {
+    if g == u32::MAX {
+        "whole".to_string()
+    } else {
+        format!("{g}x{g}")
+    }
+}
+
+/// The prescan an encoder would run, and the cheaper search that might replace it.
+///
+/// Ternary search assumes the cost curve over `log2(block)` has one minimum. Finding 15 measured a
+/// shallow bowl, which looks unimodal, but "looks unimodal on 25 images" is not a proof — so the
+/// exhaustive answer is computed too and the two are compared per image.
+fn ternary_search(plane: &Plane, candidates: &[u32]) -> u32 {
+    let mut lo = 0usize;
+    let mut hi = candidates.len() - 1;
+    while hi - lo > 2 {
+        let a = lo + (hi - lo) / 3;
+        let b = hi - (hi - lo) / 3;
+        if plane.uniform_bits_or_whole(candidates[a]) <= plane.uniform_bits_or_whole(candidates[b])
+        {
+            hi = b - 1;
+        } else {
+            lo = a + 1;
+        }
+    }
+    (lo..=hi)
+        .min_by_key(|&i| plane.uniform_bits_or_whole(candidates[i]))
+        .map(|i| candidates[i])
+        .unwrap_or(candidates[0])
+}
+
+trait WholeOrGrid {
+    fn uniform_bits_or_whole(&self, grid: u32) -> u64;
+}
+
+impl WholeOrGrid for Plane<'_> {
+    fn uniform_bits_or_whole(&self, grid: u32) -> u64 {
+        if grid == u32::MAX {
+            self.block_bits(0, 0, self.width, self.height)
+        } else {
+            self.uniform_bits(grid)
+        }
+    }
+}
 
 fn main() -> Result<()> {
     let dir: PathBuf = std::env::args()
@@ -194,9 +117,9 @@ fn main() -> Result<()> {
 
     println!(
         "Exact bits under block_coder 1, prediction pinned to the per-8x8-block layout.\n\
-         Payload is Golomb-Rice at the best parameter; every block also pays a base and a mode.\n\
-         The quadtree column is the *ceiling*: bottom-up, the cheaper of whole or split, plus one\n\
-         flag bit per node that had the choice. Leaves stop at {LEAF}x{LEAF}.\n"
+         Every block pays a base and a mode; the payload is Rice at the best parameter.\n\
+         `quadtree` is the ceiling at an {LEAF}x{LEAF} leaf; `32/64` is the two-bit tree a format\n\
+         could carry; `auto` is the cheapest uniform grid, chosen by an exact prescan.\n"
     );
 
     let mut rows = Vec::new();
@@ -213,8 +136,8 @@ fn main() -> Result<()> {
         let photo = name.starts_with("photo-kodim")
             || u64::from(img.width()) * u64::from(img.height()) > 4_000_000;
 
+        // Stage 1 took the whole image; there is no block stream left to partition.
         if coded.is_empty() {
-            // Stage 1 took the whole image; there is no block stream to adapt.
             continue;
         }
 
@@ -234,98 +157,142 @@ fn main() -> Result<()> {
             coded: &coded,
         };
 
-        let size = root_size(img.width(), img.height());
-        let mut leaves = Vec::new();
-        let quadtree = plane.shape(0, 0, size, &mut leaves);
-        debug_assert_eq!(quadtree, plane.quadtree_bits(0, 0, size));
-        leaves.sort_by_key(|(s, _)| *s);
+        let (quadtree, quadtree_leaves) = plane.quadtree_bits(LEAF);
+        let (tree_32_64, tree_leaves) = plane.restricted_tree_bits();
+
+        // What the prescan costs, against costing one grid, which is what an encoder does anyway.
+        let start = Instant::now();
+        let mut auto_grid = CANDIDATES[0];
+        let mut auto_bits = u64::MAX;
+        for &g in &CANDIDATES {
+            let bits = plane.uniform_bits_or_whole(g);
+            if bits < auto_bits {
+                auto_bits = bits;
+                auto_grid = g;
+            }
+        }
+        let prescan_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let start = Instant::now();
+        std::hint::black_box(plane.uniform_bits(16));
+        let one_grid_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         rows.push(Row {
             name,
             photo,
             raw: img.data().len(),
-            quadtree,
             uniform: GRIDS.iter().map(|&g| (g, plane.uniform_bits(g))).collect(),
-            leaves,
+            whole: plane.block_bits(0, 0, img.width(), img.height()),
+            quadtree,
+            quadtree_leaves,
+            tree_32_64,
+            tree_leaves,
+            auto_grid,
+            auto_bits,
+            ternary_grid: ternary_search(&plane, &CANDIDATES),
+            prescan_ms,
+            one_grid_ms,
         });
     }
 
     println!(
-        "  {:<24}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>7}",
-        "image", "8x8", "16x16", "32x32", "64x64", "quadtree", "gain"
+        "  {:<24}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}  {:>8}  {:>7}  {:>7}",
+        "image", "whole", "8x8", "16x16", "32x32", "64x64", "quadtree", "32/64", "auto"
     );
-    println!("  {:-<1$}", "", 82);
+    println!("  {:-<1$}", "", 100);
     for r in &rows {
-        let best = r.uniform.iter().map(|(_, b)| *b).min().unwrap_or(0);
         let cells: String = r
             .uniform
             .iter()
-            .map(|(_, b)| format!("  {:>7.2}%", percent(*b, r.raw)))
+            .map(|(_, b)| format!("  {:>6.2}%", percent(*b, r.raw)))
             .collect();
         println!(
-            "  {:<24}{cells}  {:>8.2}%  {:>+6.2}",
+            "  {:<24}  {:>6.2}%{cells}  {:>7.2}%  {:>6.2}%  {:>6.2}% {}",
             r.name,
+            percent(r.whole, r.raw),
             percent(r.quadtree, r.raw),
-            percent(r.quadtree, r.raw) - percent(best, r.raw),
+            percent(r.tree_32_64, r.raw),
+            percent(r.auto_bits, r.raw),
+            grid_name(r.auto_grid),
         );
     }
     println!();
 
-    for (label, keep) in [
-        ("photographs", true),
-        ("synthetic", false),
-    ] {
+    for (label, keep) in [("photographs", true), ("synthetic", false)] {
         let group: Vec<&Row> = rows.iter().filter(|r| r.photo == keep).collect();
         if group.is_empty() {
             continue;
         }
         let raw: usize = group.iter().map(|r| r.raw).sum();
-        let quadtree: u64 = group.iter().map(|r| r.quadtree).sum();
-        let cells: String = GRIDS
-            .iter()
-            .map(|&g| {
-                let bits: u64 = group
-                    .iter()
-                    .map(|r| r.uniform.iter().find(|(s, _)| *s == g).map_or(0, |(_, b)| *b))
-                    .sum();
-                format!("  {:>7.2}%", percent(bits, raw))
-            })
-            .collect();
-        let best = GRIDS
+        let sum = |f: &dyn Fn(&Row) -> u64| group.iter().map(|r| f(r)).sum::<u64>();
+        let uniform: Vec<u64> = GRIDS
             .iter()
             .map(|&g| {
                 group
                     .iter()
-                    .map(|r| r.uniform.iter().find(|(s, _)| *s == g).map_or(0, |(_, b)| *b))
+                    .map(|r| {
+                        r.uniform
+                            .iter()
+                            .find(|(s, _)| *s == g)
+                            .map_or(0, |(_, b)| *b)
+                    })
                     .sum::<u64>()
             })
-            .min()
-            .unwrap_or(0);
+            .collect();
+        let best_uniform = uniform.iter().copied().min().unwrap_or(0);
+        let cells: String = uniform
+            .iter()
+            .map(|b| format!("  {:>6.2}%", percent(*b, raw)))
+            .collect();
         println!(
-            "  {:<24}{cells}  {:>8.2}%  {:>+6.2}",
-            format!("{label} ({} images)", group.len()),
-            percent(quadtree, raw),
-            percent(quadtree, raw) - percent(best, raw),
+            "  {:<24}  {:>6.2}%{cells}  {:>7.2}%  {:>6.2}%  {:>6.2}%",
+            format!("{label} ({})", group.len()),
+            percent(sum(&|r| r.whole), raw),
+            percent(sum(&|r| r.quadtree), raw),
+            percent(sum(&|r| r.tree_32_64), raw),
+            percent(sum(&|r| r.auto_bits), raw),
+        );
+        println!(
+            "  {:<24}  gain over the best uniform grid: quadtree {:+.2}, 32/64 {:+.2}, auto {:+.2}",
+            "",
+            percent(sum(&|r| r.quadtree), raw) - percent(best_uniform, raw),
+            percent(sum(&|r| r.tree_32_64), raw) - percent(best_uniform, raw),
+            percent(sum(&|r| r.auto_bits), raw) - percent(best_uniform, raw),
         );
     }
     println!();
 
-    println!("Where the quadtree's leaves ended up, as a share of the samples they cover:");
+    let agree = rows.iter().filter(|r| r.auto_grid == r.ternary_grid).count();
+    let prescan: f64 = rows.iter().map(|r| r.prescan_ms).sum();
+    let one: f64 = rows.iter().map(|r| r.one_grid_ms).sum();
+    println!(
+        "Prescan: {:.0} ms over the corpus against {:.0} ms to cost a single grid, {:.1}x.\n\
+         A ternary search over the same candidates picks the same grid on {agree} of {} images.",
+        prescan,
+        one,
+        prescan / one.max(f64::MIN_POSITIVE),
+        rows.len()
+    );
+    println!();
+
+    println!("Where the leaves ended up, as a share of the samples they cover:");
+    println!("  {:<24}  {:<34}  32/64 tree", "image", "quadtree");
     for r in &rows {
-        let covered: u64 = r.leaves.iter().map(|(s, n)| u64::from(*s) * u64::from(*s) * n).sum();
-        let shape: String = r
-            .leaves
-            .iter()
-            .map(|(s, n)| {
-                let share = 100.0 * (u64::from(*s) * u64::from(*s) * n) as f64 / covered as f64;
-                format!("  {s}x{s}: {share:>5.1}%")
-            })
-            .collect();
-        println!("  {:<24}{shape}", r.name);
+        let shape = |l: &Leaves| {
+            l.shares()
+                .iter()
+                .map(|(s, share)| format!("{s}:{share:.0}% "))
+                .collect::<String>()
+        };
+        println!(
+            "  {:<24}  {:<34}  {}",
+            r.name,
+            shape(&r.quadtree_leaves),
+            shape(&r.tree_leaves)
+        );
     }
     println!(
-        "\nA gain of +0.00 means adaptation found nothing the best uniform grid did not.\n\
-         Sizes exclude the file header and the prediction codes, which are identical in every\n\
+        "\nSizes exclude the file header and the prediction codes, which are identical in every\n\
          column and would only dilute the difference."
     );
     Ok(())

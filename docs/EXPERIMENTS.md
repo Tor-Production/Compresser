@@ -752,6 +752,135 @@ Under `block_coder` 2 the ceiling was not computed — the model's state crosses
 a node cannot be priced in isolation — but the uniform sweep above bounds the interest: 0.25 points
 separate every block size on the photographs, and adaptation is competing for that.
 
+### 16. Two partitionings a format could actually carry
+
+Finding 15 priced the quadtree ceiling — 0.46 points on photographs, 1.17 on the synthetic corpus —
+without saying how much of it a *shippable* design could reach. Two designs were costed with the
+same arithmetic, in `quadtree-rice`.
+
+**The 32/64 tree.** Walk the 32x32 grid in raster order. Each block spends one bit on "split into
+four 16x16?". A block that does not split and sits at the corner of a 64x64 group spends a second
+bit on "take the whole 64x64 instead?", and when that bit is set the other three 32x32 blocks of
+the group are absorbed and spend nothing. Two decisions, three sizes, no recursion, and a decoder
+that walks the same grid the uniform coder walks while reading at most two bits per block.
+
+**Auto grid.** No tree at all: cost every candidate grid exactly — whole image, 64x64, 32x32,
+16x16, 8x8 — and encode at the cheapest. One number in the header, which is already there.
+
+| | best uniform | quadtree ceiling | 32/64 tree | auto grid |
+|---|---:|---:|---:|---:|
+| Photographs (8) | 58.18% | 57.72% (−0.46) | **57.96% (−0.22)** | 58.18% (−0.00) |
+| Synthetic (15) | 31.13% | 29.96% (−1.17) | 30.76% (−0.37) | **30.11% (−1.02)** |
+
+**The two halves of the gain live in different places, and neither design gets both.** On
+photographs the whole image wants the same grid — all eight choose 16x16, so choosing per image
+wins nothing — and what is left is local: the 32/64 tree collects half the ceiling with two bits per
+block. On the synthetic corpus it is the opposite. Those images disagree with *each other* about
+the grid — text pages want 8x8, gradients want the whole image — so picking one grid per image
+collects 87% of the ceiling, while a local tree anchored at 32x32 collects a third of it.
+
+That also explains why finding 15's ceiling looked unreachable: it is the sum of two effects that
+one mechanism cannot capture.
+
+The prescan is cheap. Costing all five candidates took 285 ms over the corpus against 56 ms to cost
+one, 5.1x — but costing a grid is not encoding at one, and the encoder spends about a second on
+this corpus, so the prescan is roughly a quarter more encode time for the whole synthetic gain. A
+ternary search over the same five candidates picks the same grid on 23 of 23 images, so the shallow
+bowl of finding 15 behaves like one minimum in practice; the exhaustive version is cheap enough
+that there is no reason to rely on that.
+
+Where the leaves land, for `kodim01`: the quadtree spreads them over 8x8 (13%), 16x16 (37%), 32x32
+(29%), 64x64 (17%) and 128x128 (4%); the 32/64 tree, which has only three sizes to offer, lands on
+16x16 (44%), 32x32 (30%) and 64x64 (26%). It is reaching for the same distribution with a coarser
+instrument, and gets half the gain for two bits per block.
+
+### 17. Compacting a channel's alphabet, and the criterion that decides it
+
+A channel holding only 0 and 255 spans the whole byte range. Stage 2 gives it an 8-bit width code,
+Rice gives it long codes, and the channel carries one bit of information per sample. Renumbering
+the values a channel actually uses so that they are contiguous — the *k*-th smallest present value
+becomes *k* — collapses that. `remap-sweep` measures it end to end, through the real encoder, with
+the table's exact bits added to the file.
+
+The transform is not new. It is PNG's `PLTE`, GIF's colour table and WebP lossless's colour-indexing
+transform, applied per channel rather than per pixel, and FLAC's "wasted bits" in the degenerate
+case where the gaps are regular; databases call the same thing dictionary encoding. What is worth
+measuring is not the idea but where it sits — before prediction, so that both prediction and the
+block coder see the compacted alphabet — and what predicts a win.
+
+#### The census
+
+How much of each channel's alphabet the corpus actually uses:
+
+| Image | Distinct | Missing | Gaps inside the range |
+|---|---:|---:|---:|
+| `text-page` | 2, 2, 2 | 254, 254, 254 | **254, 254, 254** |
+| `screenshot-like` | 7, 7, 7 | 249, 249, 249 | **249, 249, 249** |
+| `narrow-rgb` | 16, 16, 16 | 240, 240, 240 | 0, 0, 0 |
+| `monotone-blue` | 24, 48, 96 | 232, 208, 160 | 0, 0, 0 |
+| `photo-like` | 155, 139, 152 | 101, 117, 104 | 0, 0, 0 |
+| `smooth-lowcontrast` | 133, 110, 110 | 123, 146, 146 | 0, 0, 0 |
+| `photo-kodim07` | 236, 249, 240 | 20, 7, 16 | **20, 7, 16** |
+| `photo-kodim05` | 256, 256, 256 | 0, 0, 0 | 0, 0, 0 |
+
+**The obvious criterion is the wrong one.** `narrow-rgb` is missing 240 of its 256 values and has
+nothing to gain: the sixteen it uses are consecutive, and stage 2 already subtracts a per-block base,
+so where that band sits in the range costs nothing. Threshold on *missing values* and the transform
+fires on it, pays for a table, and makes the file 0.05 points larger. Threshold on values missing
+from *inside the channel's own range* and it does not fire at all.
+
+Photographs sit at the other end: they use 233 to 256 values per channel, and what they are missing
+is interior, but only 0 to 23 values of it.
+
+#### The measurement
+
+Sizes at 16x16 blocks, table included, every entry decoded and un-remapped back to the source:
+
+| Criterion | Photographs | Synthetic |
+|---|---:|---:|
+| off (the control) | 58.38% | 25.93% |
+| threshold on missing values | 58.38% | 24.87% |
+| **threshold on interior gaps** | 58.38% | **24.82%** |
+
+**1.11 points on the synthetic corpus, nothing on photographs, and nothing measurable in speed** —
+14 MiB/s encoding either way, since the census is one pass over the samples and applying the map is
+a byte lookup.
+
+The threshold itself turns out not to matter. Every value from 1 to 128 gives the same file, because
+a channel in this corpus either has no interior gaps at all or has hundreds. It is the criterion
+that decides, not where it is set.
+
+Where the gain is:
+
+| Image | off | remapped |
+|---|---:|---:|
+| `text-page` | 14.85% | **3.38%** |
+| `text-page-gray` | 14.95% | **10.05%** |
+| `screenshot-like` | 7.53% | **2.50%** |
+
+A text page is four and a half times smaller. That is the case the transform is for, and it is the
+same case the quadtree of finding 16 wins on — content whose regions differ in kind — reached
+without any partitioning at all.
+
+Under the interior-gap criterion **no image in the corpus regresses**: every image that does not
+win is byte-identical to the control, because the transform declines to fire. Under the missing-value
+criterion six images lose between 0.01 and 0.25 points. That difference is the whole finding.
+
+#### Why it is not simply free
+
+Two reasons it needs the criterion rather than a "why not always" answer.
+
+The map costs a table: one bit per channel, and for a remapped channel either a list of the missing
+values or a bitmap over its range with the two endpoints, whichever is smaller. On `flat-rgb` — one
+value per channel, which stage 1 elides entirely — that table is three times the size of the whole
+file.
+
+And the residuals BRP codes are differences *modulo 256*. The rank map is monotone, so it never
+grows an arithmetic difference, but it shortens the circle those differences live on: 255 and 0 are
+one apart modulo 256 and code as a magnitude of 1, and after compaction to a 200-value alphabet the
+same pair is 56 apart. On this corpus that never outweighed the compaction, but it is the reason
+"monotone, therefore never worse" is false.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007), the
@@ -805,18 +934,24 @@ measured size rather than assumed.
    24 and 80 against 9 and 96.
 4. ~~Context modelling for the Rice parameter.~~ Done, version 5, as an opt-in coder rather than
    the default: 1.6 points against the best fixed block size, at half the decode speed (finding 13).
-5. ~~Adaptive block size.~~ Measured, finding 15, and it is now a *ceiling* rather than a
+5. ~~Adaptive block size.~~ Measured, findings 15 and 16, and it is now a *ceiling* rather than a
    proposal: an exact quadtree under the Rice coder gains 0.46 points on photographs and 1.17 on
    the synthetic corpus over the best uniform grid, against the 4 points finding 4 measured under
-   fixed-width packing. Under the context coder every block size lands within 0.25 points of every
-   other, so there is even less to win. **Not worth building** at that price; the same effort has
-   returned 1.3-1.5 points twice, in versions 5 and 6.
+   fixed-width packing. Two shippable designs reach parts of it — a 32/64 tree takes 0.22 of the
+   photographs' 0.46, and choosing the grid per image takes 1.02 of the synthetic corpus's 1.17 —
+   and they take *different* parts, which is why neither looked worth its complexity alone.
 
 6. ~~Better predictors.~~ Done, version 6, and the answer was not the one the item was written
    around. LOCO-I's and CALIC's predictors are worth about half a point; choosing among PNG's own
    five per 8x8 block instead of per row is worth one and a half and costs nothing measurable to
    decode, so that is what ADR 0010 adopted. MED and GAP stay measured and unadopted until
    somebody wants 0.45 points at a quarter of the decode rate.
+
+7. **Compacting a channel's alphabet.** Finding 17: renumbering the values a channel actually
+   uses is worth 1.11 points on the synthetic corpus, nothing on photographs, and nothing
+   measurable in speed, provided the criterion is gaps *inside* the channel's range rather than
+   values missing from 0..=255. A text page goes from 14.85% of raw to 3.38%. This is the largest
+   untaken win on the board and the cheapest to implement.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
 per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage

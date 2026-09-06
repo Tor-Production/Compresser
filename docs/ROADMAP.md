@@ -54,7 +54,24 @@ have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Deciding what the documented configuration is  ← next, and now decided on the evidence
+### 1. Compacting a channel's alphabet  ← next, and the cheapest win left
+
+Finding 17. If a channel never uses some values *from inside its own range*, renumber the ones it
+does use so they are contiguous, before prediction. A text page goes from 14.85% of raw to
+**3.38%**, `screenshot-like` from 7.53% to 2.50%, and the synthetic corpus overall from 25.93% to
+**24.82%**. Photographs do not move and neither does throughput: the census is one pass over the
+samples and applying the map is a byte lookup.
+
+The criterion is the whole design. Thresholding on values missing from 0..=255 fires on channels
+that use a contiguous band — which stage 2's per-block base already handles — and costs six images
+between 0.01 and 0.25 points. Thresholding on gaps *inside* the range fires only where there is
+something to win, and no image in the corpus regresses.
+
+What adoption needs: a header flag per channel, a table (a list of missing values or a bitmap over
+the range, whichever is smaller), a version bump and an ADR. The transform sits in stage 1, beside
+the constant and alias elision it resembles.
+
+### 2. Deciding what the documented configuration is
 
 Finding 15 swept every block size on every image — the whole image, the image halved repeatedly,
 and fixed squares — and the answer is no longer split:
@@ -71,6 +88,12 @@ What remains is bookkeeping, and it is why this has not been done yet: the shipp
 the whole image, every table in `EXPERIMENTS.md` quotes 8x8, and moving the documented grid
 restates every figure on the page at once. It should be one commit, with the whole page re-measured
 and `EncodeOptions::block_size`'s default changed with it — not drifted into.
+
+Finding 16 adds a cheaper option than a fixed choice: cost all five candidate grids and encode at
+the cheapest. It is worth **1.02 points on the synthetic corpus** and nothing on the photographs,
+which all prefer 16x16 anyway, and costs about a quarter more encode time. That is the same
+"measure rather than guess" bargain `FilterChoice::Auto` already makes, and it would make the
+documented block size a fallback rather than a decision.
 
 ## Later
 
@@ -89,15 +112,20 @@ and `EncodeOptions::block_size`'s default changed with it — not drifted into.
 
 ## Not planned
 
-- **Adaptive block size (a quadtree).** Measured as a *ceiling* rather than a proposal in finding
-  15: an exact bottom-up quadtree, costed in the bits the format would really spend under the Rice
-  coder, gains **0.46 points on photographs** and 1.17 on the synthetic corpus over the best
-  uniform grid. Finding 4 measured 4 points for the same idea under fixed-width packing; Rice has
-  taken seven eighths of it, and the context coder narrows every block size to within 0.25 points
-  of every other. What remains is concentrated in mixed synthetic content — screenshots and text
-  pages, 0.6 to 0.9 points — and buying it costs a variable-size block loop in the decoder and a
-  pyramid of cost evaluations in the encoder. The same effort has returned 1.3-1.5 points twice, in
-  versions 5 and 6.
+- **A full quadtree.** Measured as a *ceiling* rather than a proposal in finding 15: an exact
+  bottom-up quadtree, costed in the bits the format would really spend under the Rice coder, gains
+  **0.46 points on photographs** and 1.17 on the synthetic corpus over the best uniform grid.
+  Finding 4 measured 4 points for the same idea under fixed-width packing; Rice has taken seven
+  eighths of it. Finding 16 then showed the remainder splits in two, and that the cheap half of
+  each side is reachable without a tree: choosing the grid per image takes 1.02 of the synthetic
+  1.17, and a 32/64 two-bit tree takes 0.22 of the photographs' 0.46. A recursive tree in the
+  bitstream buys the difference — 0.24 points on photographs, 0.15 on synthetic — for a
+  variable-size block loop in the decoder.
+- **A 32/64 split-and-merge tree.** Worth 0.22 points on photographs and 0.37 on the synthetic
+  corpus (finding 16), for two bits per 32x32 block and a decoder that must handle three block
+  sizes in one image. Cheaper than a quadtree and it earns its place only if the block loop is
+  rewritten for another reason; the alphabet transform above is four times the win for none of
+  that complexity.
 - **LZW.** Measured at 80.9% against Deflate's 56.0% on the same bytes. Dictionary matching without
   a good entropy stage is not competitive, and Deflate already provides both.
 - **Patched frame of reference.** The textbook fix for BRP's exact weakness, and half our blocks

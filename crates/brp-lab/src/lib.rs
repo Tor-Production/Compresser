@@ -15,11 +15,13 @@ use std::io::Write;
 pub mod blockpack;
 pub mod context;
 pub mod filters;
+pub mod grid;
 pub mod huffman;
 pub mod lzw;
 pub mod predict;
 pub mod predictors;
 pub mod quadtree;
+pub mod remap;
 
 /// One compression pipeline, end to end.
 pub trait Codec: Sync {
