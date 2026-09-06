@@ -33,6 +33,7 @@ fn arb_filter() -> impl Strategy<Value = FilterChoice> {
     prop_oneof![
         Just(FilterChoice::Off),
         Just(FilterChoice::Row),
+        Just(FilterChoice::Block),
         Just(FilterChoice::Auto),
     ]
 }
@@ -115,9 +116,19 @@ proptest! {
             coder: CoderChoice::Fixed,
         };
         let off = encode(&src, &base(FilterChoice::Off)).unwrap().len();
-        let on = encode(&src, &base(FilterChoice::Row)).unwrap().len();
+        let by_row = encode(&src, &base(FilterChoice::Row)).unwrap().len();
+        let by_block = encode(&src, &base(FilterChoice::Block)).unwrap().len();
         let auto = encode(&src, &base(FilterChoice::Auto)).unwrap().len();
-        prop_assert_eq!(auto, on.min(off));
+
+        // Auto's rule, exactly as `FilterChoice::Auto` documents it: prediction has to earn its
+        // place before the finer layout is even tried, because a file that does not want to be
+        // predicted does not want to pay more side information for it.
+        let expected = if by_row < off {
+            by_row.min(by_block)
+        } else {
+            off
+        };
+        prop_assert_eq!(auto, expected);
     }
 
     /// `Auto` must not lose to either fixed coder choice either.

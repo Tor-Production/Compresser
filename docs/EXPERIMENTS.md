@@ -710,16 +710,15 @@ measured size rather than assumed.
    24 and 80 against 9 and 96.
 4. ~~Context modelling for the Rice parameter.~~ Done, version 5, as an opt-in coder rather than
    the default: 1.6 points against the best fixed block size, at half the decode speed (finding 13).
-5. **Adaptive block size.** Weaker than it was. Finding 11 predicted context modelling would take
+5. **Adaptive block size** — the remaining item, and weaker than it was. Finding 11 predicted context modelling would take
    most of its force, and finding 13 confirms it: the header cost that made small blocks expensive
    is gone under coder 2, and the payload penalty that made large blocks expensive *was* the
    per-block parameter. Its cost model still assumes fixed-width packing and still has to be
    rewritten before the 4-point figure means anything.
-6. **Better predictors.** Measured, finding 14, and the answer was not the one the item was
-   written around. LOCO-I's and CALIC's predictors are worth about half a point; choosing among
-   PNG's own five per 8x8 block instead of per row is worth one and a half, and costs nothing
-   measurable to decode. **Adopt the per-block choice** — a version bump, a filter mode, and a
-   prediction grid that does not borrow stage 2's. MED and GAP stay measured and unadopted until
+6. ~~Better predictors.~~ Done, version 6, and the answer was not the one the item was written
+   around. LOCO-I's and CALIC's predictors are worth about half a point; choosing among PNG's own
+   five per 8x8 block instead of per row is worth one and a half and costs nothing measurable to
+   decode, so that is what ADR 0010 adopted. MED and GAP stay measured and unadopted until
    somebody wants 0.45 points at a quarter of the decode rate.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
