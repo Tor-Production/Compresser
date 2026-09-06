@@ -1,4 +1,4 @@
-# BRP v4 — Block Range Packing bitstream specification
+# BRP v5 — Block Range Packing bitstream specification
 
 **Status:** normative. The implementation in `crates/brp-core` MUST match this document.
 Golden-byte tests in `crates/brp-core/tests/golden.rs` enforce the match. Any change to this
@@ -27,21 +27,24 @@ five predictors — the same five PNG defines — shared by every coded channel,
 replaced by the *zigzagged* difference from its prediction. Stage 2 then packs those residuals
 instead of the samples.
 
-**Stage 2, block packing.** The image is divided into a grid of blocks. Within each block, each
-coded channel has its minimum stored as a *base* and subtracted from every sample, leaving
-residuals in `0 ..= (max - min)`. Those residuals are then written by one of two coders, named once
-for the whole file in `block_coder`:
+**Stage 2, block packing.** The image is divided into a grid of blocks, and each coded channel of
+each block is written by one of three coders, named once for the whole file in `block_coder`:
 
-- **Fixed width** — the number of bits needed for `max - min` is stored, and every residual is
-  packed at exactly that width. Fast, and best when residuals are spread evenly.
-- **Golomb-Rice** — a parameter is stored and each residual is written as a unary quotient plus
-  that many low bits, so each sample pays for its own magnitude. Smaller when residuals are
-  concentrated near zero, which is what prediction produces.
+- **Fixed width** (0) — the block's minimum is stored as a *base* and subtracted from every sample,
+  leaving residuals in `0 ..= (max - min)`; the number of bits needed for that span is stored, and
+  every residual is packed at exactly that width. Fast, and best when residuals are spread evenly.
+- **Golomb-Rice** (1) — a base as above, then a parameter, and each residual written as a unary
+  quotient plus that many low bits, so each sample pays for its own magnitude. Smaller when
+  residuals are concentrated near zero, which is what prediction produces.
+- **Context-modelled Golomb-Rice** (2) — the same codes with no parameter in the file at all.
+  Encoder and decoder derive `k` per sample from a context of quantised local gradients they can
+  both see. The model adapts *within* a block instead of only across blocks, and neither the base
+  nor the parameter field is written. Smaller again, and slower to decode; see section 6.3.
 
-If `max == min` neither coder emits any payload — the base alone reconstructs the block. A
-whole-image constant channel would also hit that path, but stage 1 is still worth having: it
-removes the per-block field from *every* block rather than just its payload, which at small block
-sizes dominates.
+Under coders 0 and 1, if `max == min` the coder emits no payload — the base alone reconstructs the
+block. A whole-image constant channel would also hit that path, but stage 1 is still worth having:
+it removes the per-block field from *every* block rather than just its payload, which at small
+block sizes dominates.
 
 ## 2. Conventions
 
@@ -60,16 +63,16 @@ Byte-aligned, at offset 0.
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
 | 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
-| 4      | `version`       | u8   | `4`                                                       |
+| 4      | `version`       | u8   | `5`                                                       |
 | 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
 | 10     | `height`        | u32  | pixels, MUST be > 0                                       |
 | 14     | `channels`      | u8   | 1 = Gray, 2 = Gray+Alpha, 3 = RGB, 4 = RGBA               |
-| 15     | `bit_depth`     | u8   | MUST be 8 in version 4                                    |
+| 15     | `bit_depth`     | u8   | MUST be 8 in version 5                                    |
 | 16     | `block_w`       | u32  | pixels, MUST be > 0                                       |
 | 20     | `block_h`       | u32  | pixels, MUST be > 0                                       |
 | 24     | `filter_mode`   | u8   | 0 = no prediction, 1 = adaptive per-row — see section 5   |
-| 25     | `block_coder`   | u8   | 0 = fixed width, 1 = Golomb-Rice — see section 6          |
+| 25     | `block_coder`   | u8   | 0 = fixed, 1 = Rice, 2 = context-modelled Rice — section 6 |
 | 26     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
 | 27     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
 | …      | `constants`     | n B  | one byte per CONSTANT channel, ascending channel order    |
@@ -170,7 +173,10 @@ may be empty, in which case the body is empty and the file is the header alone.
 Blocks follow the prediction section, or start the body when `filter_mode` is 0. The samples the
 block packer sees are the residuals from section 5 whenever prediction is on.
 
-For each block, in raster order, the following is written with no alignment between parts:
+For each block, in raster order, the following is written with no alignment between parts. The
+shape of part 1 depends on `block_coder`.
+
+Under `block_coder` 0 and 1:
 
 ```
 Part 1 — channel headers, for each c in coded_channels, in order:
@@ -182,13 +188,29 @@ Part 2 — channel payloads, for each c in coded_channels, in order:
     each residual = sample - base[c], written as 6.1 or 6.2 requires
 ```
 
+Under `block_coder` 2:
+
+```
+Part 1 — channel headers, for each c in coded_channels, in order:
+    zero[c]  : 1 bit             (1 = every residual in this block-channel is zero)
+
+Part 2 — channel payloads, for each c in coded_channels, in order:
+    nothing at all when zero[c] is 1, otherwise
+    bw * bh residuals in raster order within the block,
+    each residual written as a Rice code at the parameter section 6.3 derives
+```
+
 Headers precede payloads for the whole block, rather than being interleaved per channel.
+
+There is no base under coder 2, and no parameter field. What survives of the block structure there
+is the grid itself: the one-bit escape, and the raster order in which the model meets the samples.
+Both earn their place by measurement — see `docs/EXPERIMENTS.md` and ADR 0009.
 
 **Note on block sizes.** Under fixed-width packing a decoder can compute a block's exact payload
 size from its headers alone, which would allow block skipping and parallel decode. Rice codes are
-variable-length, so that property does not hold when `block_coder` is 1. Recovering it would need
-an explicit table of block offsets, and is deliberately left out: it costs bits, nothing in the
-codec uses it yet, and Rice is worth twelve percentage points.
+variable-length, so that property does not hold when `block_coder` is 1 or 2. Recovering it would
+need an explicit table of block offsets, and is deliberately left out: it costs bits, nothing in
+the codec uses it yet, and Rice is worth twelve percentage points.
 
 ### 6.1 Fixed width (`block_coder` = 0)
 
@@ -229,6 +251,98 @@ An encoder chooses the mode freely — the choice affects size, never correctnes
 encoder costs all nine parameters exactly and takes the cheapest, preferring the smaller `k` on a
 tie.
 
+### 6.3 Context-modelled Golomb-Rice (`block_coder` = 2)
+
+The codes are exactly those of 6.2. What differs is where `k` comes from: nothing in the file names
+it. Both sides compute it from neighbours they have already seen, so the parameter costs no bits
+and can change from one sample to the next.
+
+Everything in this section is normative and exact. Encoder and decoder must derive bit-identical
+parameters or the stream desynchronises, so nothing here may be approximated.
+
+#### 6.3.1 Neighbours
+
+For the residual at position `(x, y)` of coded channel `c`, the three neighbours are, in the
+*residual* plane and in the same channel:
+
+```
+a = residual at (x - 1, y)          left
+b = residual at (x,     y - 1)      above
+d = residual at (x - 1, y - 1)      upper-left
+```
+
+Neighbours outside the image read as 0. Every one of them precedes `(x, y)` in the order blocks and
+samples are written, so a decoder always holds them by the time it needs them: `a` is either
+earlier in this block's row or in the block to the left, and `b` and `d` lie in an earlier row of
+this block or in a block above. The upper-right neighbour that LOCO-I also uses is deliberately
+**not** part of the context: on a block's right edge it belongs to a block that has not been
+decoded yet, and making the context depend on block geometry to work around that costs more than
+the fourth gradient is worth.
+
+The values read are residuals, not samples — the same bytes the decoder writes into its buffer in
+step 2 of section 7. When `filter_mode` is 1 they are zigzagged prediction residuals; when it is 0
+they are samples. The context is defined on whatever stage 2 is coding, so the reconstruction
+order of section 7 is unchanged by this coder.
+
+#### 6.3.2 Quantised gradients
+
+Undo the zigzag to recover a signed error, then quantise it to one of nine levels:
+
+```
+err(v)  = signed 8-bit interpretation of ((v >> 1) ^ -(v & 1)), so in -128 ..= 127
+
+Q(0)    = 0
+Q(e)    = 1 if 1 <= e <= 3, 2 if e <= 7, 3 if e <= 21, 4 otherwise      for e > 0
+Q(e)    = -Q(-e)                                                        for e < 0
+
+q1 = Q(err(b)),  q2 = Q(err(d)),  q3 = Q(err(a))
+```
+
+The bucket boundaries 3, 7 and 21 are JPEG-LS's for 8-bit samples, kept because tuning them on the
+corpus was measured to be worth 0.03 percentage points.
+
+If the first non-zero of `(q1, q2, q3)` is negative, all three are negated. A context and its
+mirror image describe the same local activity, and the value being coded is a magnitude, so folding
+them together doubles the evidence each context sees. The context index is then
+
+```
+context = ((q1 + 4) * 9 + (q2 + 4)) * 9 + (q3 + 4)
+```
+
+in `0 ..= 728`, of which 365 are reachable after folding.
+
+#### 6.3.3 The model
+
+One set of counters `A[q]` and `N[q]`, shared by every coded channel, spanning the whole file. At
+the start of the block stream every `A[q]` is 4 and every `N[q]` is 1.
+
+The parameter for a residual in context `q` is
+
+```
+k = the smallest k in 0 ..= 8 with (N[q] << k) >= A[q]
+```
+
+After that residual `v` has been coded — written by an encoder, read by a decoder — the counters
+advance:
+
+```
+A[q] += (v + 1) >> 1
+if N[q] == 64 then A[q] >>= 1 and N[q] >>= 1
+N[q] += 1
+```
+
+A block-channel whose `zero` bit is 1 advances nothing: it codes no residuals, so the model does
+not see it.
+
+`(v + 1) >> 1` is the magnitude of the prediction error, and `v` is the zigzag code that carries
+it, which is twice as large. Accumulating `v` itself lands every parameter one step too high and
+costs about 2.6 percentage points; the halving is load-bearing, not a rounding detail. `A[q]` never
+exceeds 16128, so 16-bit counters suffice and 32-bit ones cannot overflow.
+
+An encoder has no freedom here. Under coders 0 and 1 the parameter is a choice that affects size
+and never correctness; under coder 2 it is derived, and an encoder that derives it differently
+produces a file that does not decode.
+
 ## 7. Reconstruction order
 
 A decoder fills the sample buffer in this order:
@@ -248,12 +362,18 @@ For one block of `n = bw * bh` pixels over `k = coded_channels.len()` channels:
 
 ```
 prediction bits = height * 3          (once per file, when filter_mode is 1)
-header bits     = k * (bit_depth + 4)
+header bits     = k * (bit_depth + 4)              under block_coder 0 and 1
+                  k                                under block_coder 2
 payload bits    = n * sum(width_code[c])           under fixed width
-                  sum over samples of their code   under Rice
+                  sum over samples of their code   under either Rice coder
 ```
 
-Rice payload size cannot be computed from the headers; measuring it means walking the codes.
+Rice payload size cannot be computed from the headers; measuring it means walking the codes. Under
+coder 2 that walk has to run the model as well, since the length of each code depends on the
+parameter the preceding samples produced.
+
+Coder 2 is what removes the header cost rather than trading it: 12 bits per block-channel become 1,
+which is why the block size that suits it is larger than the one that suits coder 1.
 
 Stage 1 is what makes the header cost disappear for degenerate channels. A solid-colour 4K RGB
 image at 8x8 blocks would otherwise pay `3 * 12` bits across 393216 blocks — 1.7 MB of pure
@@ -264,7 +384,7 @@ overhead — and instead costs 28 bytes in total.
 A decoder MUST reject, with an error and never a panic:
 
 - `magic` != `42 52 50 1A`
-- `version` != 4
+- `version` != 5
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
 - any of `width`, `height`, `block_w`, `block_h` == 0
@@ -272,7 +392,7 @@ A decoder MUST reject, with an error and never a panic:
 - `filter_mode` above 1
 - `filter_mode` of 1 with no `CODED` channel
 - a filter kind above 4
-- `block_coder` above 1
+- `block_coder` above 2
 - a width code above `bit_depth`, under `block_coder` 0
 - a Rice mode above 9, under `block_coder` 1
 - a channel mode of 3
@@ -301,6 +421,13 @@ residual is bounded by `max - min`. A decoder is *not* required to detect it: th
 the innermost loop of the hot path and carries no memory-safety implication, because the sample type
 is already the full width of the bit depth.
 
+**Coder 2 needs no validation of its own.** It has no field a file can get wrong: the escape bit
+has two valid values, and every parameter is derived rather than read. A decoder must still enforce
+the rules above, and must still refuse a bitstream that ends early — the block geometry says how
+many residuals to read, and running out of bits before then is the only way a coder 2 stream can be
+malformed. The derived `k` is always in `0 ..= 8` and the context index always in `0 ..= 728`
+whatever bits the file contains, so neither can index out of range.
+
 ## 10. Version history
 
 | Version | Change |
@@ -309,3 +436,4 @@ is already the full width of the bit depth.
 | 2 | Version-independent magic. Constant-channel elision generalised from alpha to every channel, and channel aliasing added, both as a whole-image stage before block packing. Replaces the v1 `ALPHA_CONSTANT` flag. |
 | 3 | Optional spatial prediction with zigzagged residuals, selected per row from PNG's five predictors, recorded in a new `filter_mode` header byte. |
 | 4 | Golomb-Rice as an alternative block coder, selected per file by a new `block_coder` header byte. Gives up the ability to compute a block's payload size from its headers. |
+| 5 | A third block coder: the same Rice codes with the parameter derived from a context of quantised local gradients rather than stored per block. Drops the base and the parameter field, and adds a one-bit escape. Not the default — it trades decode speed for ratio. ADR 0009. |

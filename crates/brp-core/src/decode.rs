@@ -4,10 +4,14 @@
 
 use crate::bitio::BitReader;
 use crate::block::BlockGrid;
-use crate::channels::ChannelMode;
+use crate::channels::{ChannelMode, CodedIndices};
+use crate::context::{ContextModel, Plane};
 use crate::encode::sample_index;
 use crate::error::BrpError;
-use crate::header::{Header, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
+use crate::header::{
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS,
+    ZERO_BLOCK_BITS,
+};
 use crate::image::{required_len, RawImage, MAX_CHANNELS};
 use crate::predict::{self, FILTER_KINDS, FILTER_KIND_BITS};
 use crate::rice;
@@ -35,14 +39,14 @@ impl Default for DecodeOptions {
     }
 }
 
-/// Decodes a BRP v4 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
+/// Decodes a BRP v5 bitstream, with [`DEFAULT_MAX_IMAGE_BYTES`] as the size limit.
 ///
 /// Returns an error for any malformed input; never panics.
 pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     decode_with(bytes, &DecodeOptions::default())
 }
 
-/// Decodes a BRP v4 bitstream with an explicit resource limit.
+/// Decodes a BRP v5 bitstream with an explicit resource limit.
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
     let (header, header_len) = Header::parse(bytes)?;
     let stride = usize::from(header.channels);
@@ -77,8 +81,6 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
     if !coded.is_empty() {
         let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
         let mut reader = BitReader::new(&bytes[header_len..]);
-        let mut bases = [0u8; MAX_CHANNELS];
-        let mut widths = [0u8; MAX_CHANNELS];
 
         // The per-row predictors precede the blocks, so they are available before they are needed.
         let mut kinds = Vec::new();
@@ -93,59 +95,10 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
             }
         }
 
-        for rect in grid.iter() {
-            // Part 1: channel headers.
-            let rice_coded = header.block_coder == BLOCK_CODER_RICE;
-            for slot in 0..coded.len() {
-                bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
-                let param = reader.read(WIDTH_CODE_BITS)?;
-                if rice_coded {
-                    // Rejects the reserved modes here; the parameter is derived below.
-                    rice::parameter_for(param)?;
-                } else if param > u32::from(header.bit_depth) {
-                    return Err(BrpError::InvalidWidthCode(param as u8));
-                }
-                widths[slot] = param as u8;
-            }
-
-            // Part 2: payloads, planar.
-            for slot in 0..coded.len() {
-                let param = u32::from(widths[slot]);
-                let base = bases[slot];
-                let channel = coded.channel(slot);
-                // `None` means the block carries no payload: every residual in it is zero.
-                let k = if rice_coded {
-                    rice::parameter_for(param)?
-                } else if param == 0 {
-                    None
-                } else {
-                    Some(param)
-                };
-
-                for row in 0..rect.h {
-                    let mut i = sample_index(header.width, stride, rect.x, rect.y + row, channel);
-                    match k {
-                        None => {
-                            for _ in 0..rect.w {
-                                data[i] = base;
-                                i += stride;
-                            }
-                        }
-                        Some(k) => {
-                            for _ in 0..rect.w {
-                                let residual = if rice_coded {
-                                    rice::read(&mut reader, k)? as u8
-                                } else {
-                                    reader.read(k)? as u8
-                                };
-                                // Wraps rather than erroring; see FORMAT.md section 9.
-                                data[i] = base.wrapping_add(residual);
-                                i += stride;
-                            }
-                        }
-                    }
-                }
-            }
+        if header.block_coder == BLOCK_CODER_CONTEXT {
+            read_context_blocks(&mut reader, &mut data, &header, &coded, &grid)?;
+        } else {
+            read_parametered_blocks(&mut reader, &mut data, &header, &coded, &grid)?;
         }
         reader.verify_padding()?;
 
@@ -177,6 +130,126 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
     }
 
     RawImage::new(header.width, header.height, header.channels, data)
+}
+
+/// Reads every block under `block_coder` 0 and 1, where each block-channel names its own base and
+/// parameter. See `FORMAT.md` sections 6.1 and 6.2.
+fn read_parametered_blocks(
+    reader: &mut BitReader,
+    data: &mut [u8],
+    header: &Header,
+    coded: &CodedIndices,
+    grid: &BlockGrid,
+) -> Result<()> {
+    let stride = usize::from(header.channels);
+    let rice_coded = header.block_coder == BLOCK_CODER_RICE;
+    let mut bases = [0u8; MAX_CHANNELS];
+    let mut widths = [0u8; MAX_CHANNELS];
+
+    for rect in grid.iter() {
+        // Part 1: channel headers.
+        for slot in 0..coded.len() {
+            bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
+            let param = reader.read(WIDTH_CODE_BITS)?;
+            if rice_coded {
+                // Rejects the reserved modes here; the parameter is derived below.
+                rice::parameter_for(param)?;
+            } else if param > u32::from(header.bit_depth) {
+                return Err(BrpError::InvalidWidthCode(param as u8));
+            }
+            widths[slot] = param as u8;
+        }
+
+        // Part 2: payloads, planar.
+        for slot in 0..coded.len() {
+            let param = u32::from(widths[slot]);
+            let base = bases[slot];
+            let channel = coded.channel(slot);
+            // `None` means the block carries no payload: every residual in it is zero.
+            let k = if rice_coded {
+                rice::parameter_for(param)?
+            } else if param == 0 {
+                None
+            } else {
+                Some(param)
+            };
+
+            for row in 0..rect.h {
+                let mut i = sample_index(header.width, stride, rect.x, rect.y + row, channel);
+                match k {
+                    None => {
+                        for _ in 0..rect.w {
+                            data[i] = base;
+                            i += stride;
+                        }
+                    }
+                    Some(k) => {
+                        for _ in 0..rect.w {
+                            let residual = if rice_coded {
+                                rice::read(reader, k)? as u8
+                            } else {
+                                reader.read(k)? as u8
+                            };
+                            // Wraps rather than erroring; see FORMAT.md section 9.
+                            data[i] = base.wrapping_add(residual);
+                            i += stride;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads every block under `block_coder` 2, the mirror of `encode::write_context_blocks`.
+///
+/// The context of each residual is read out of `data`, which by then holds the residuals this loop
+/// has already stored — so the neighbours it needs are always present, and the reconstruction
+/// order of `FORMAT.md` section 7 is untouched. Nothing here is indexed by a value from the file:
+/// the parameter is derived and bounded by construction, and the escape bit has no invalid value.
+fn read_context_blocks(
+    reader: &mut BitReader,
+    data: &mut [u8],
+    header: &Header,
+    coded: &CodedIndices,
+    grid: &BlockGrid,
+) -> Result<()> {
+    let stride = usize::from(header.channels);
+    let plane = Plane::new(header.width, stride);
+    let mut model = ContextModel::new();
+    let mut all_zero = [false; MAX_CHANNELS];
+
+    for rect in grid.iter() {
+        for zero in all_zero[..coded.len()].iter_mut() {
+            *zero = reader.read(ZERO_BLOCK_BITS)? == 1;
+        }
+
+        for (slot, &all_zero) in all_zero[..coded.len()].iter().enumerate() {
+            let channel = coded.channel(slot);
+            for row in 0..rect.h {
+                let y = rect.y + row;
+                let mut i = sample_index(header.width, stride, rect.x, y, channel);
+                if all_zero {
+                    // No payload, and the model never saw these samples.
+                    for _ in 0..rect.w {
+                        data[i] = 0;
+                        i += stride;
+                    }
+                    continue;
+                }
+                for col in 0..rect.w {
+                    let x = rect.x + col;
+                    let context = plane.context(data, x, y, channel);
+                    let v = rice::read(reader, model.parameter(context))?;
+                    model.update(context, v);
+                    data[i] = v as u8;
+                    i += stride;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

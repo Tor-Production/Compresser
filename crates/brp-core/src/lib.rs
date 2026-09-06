@@ -22,6 +22,7 @@ mod analysis;
 mod bitio;
 mod block;
 mod channels;
+mod context;
 mod decode;
 mod encode;
 mod error;
@@ -38,8 +39,9 @@ pub use decode::{decode, decode_with, DecodeOptions, DEFAULT_MAX_IMAGE_BYTES};
 pub use encode::{encode, CoderChoice, EncodeOptions, FilterChoice};
 pub use error::BrpError;
 pub use header::{
-    Header, BIT_DEPTH, BLOCK_CODER_FIXED, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE,
-    HEADER_BASE_SIZE, MAGIC, VERSION, WIDTH_CODE_BITS,
+    Header, BIT_DEPTH, BLOCK_CODER_CONTEXT, BLOCK_CODER_FIXED, BLOCK_CODER_RICE,
+    FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, MAGIC, VERSION, WIDTH_CODE_BITS,
+    ZERO_BLOCK_BITS,
 };
 pub use image::{required_len, RawImage, MAX_CHANNELS};
 pub use predict::{

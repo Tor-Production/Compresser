@@ -15,7 +15,7 @@ pub enum BrpError {
     #[error("unsupported format version {found}, this build reads version {expected}")]
     UnsupportedVersion { found: u8, expected: u8 },
 
-    #[error("unsupported bit depth {0}, only 8 is defined in version 4")]
+    #[error("unsupported bit depth {0}, only 8 is defined in version 5")]
     UnsupportedBitDepth(u8),
 
     #[error("invalid channel count {0}, expected 1, 2, 3 or 4")]
@@ -27,10 +27,10 @@ pub enum BrpError {
     #[error("reserved flag bits set: 0x{0:02x}")]
     ReservedFlagsSet(u8),
 
-    #[error("unsupported filter mode {0}, version 4 defines 0 and 1")]
+    #[error("unsupported filter mode {0}, version 5 defines 0 and 1")]
     UnsupportedFilterMode(u8),
 
-    #[error("unsupported block coder {0}, version 4 defines 0 and 1")]
+    #[error("unsupported block coder {0}, version 5 defines 0, 1 and 2")]
     UnsupportedBlockCoder(u8),
 
     #[error("invalid Rice mode {0}, must be 0..=9")]

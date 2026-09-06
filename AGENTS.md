@@ -18,10 +18,12 @@ PNG's five predictors and every sample becomes the **zigzagged** difference from
 The zigzag is not cosmetic — without it this stage makes files *larger than raw*.
 
 **Stage 2, block packing.** Split the image into blocks; per block, per coded channel, store the
-minimum as a *base* and subtract it. The residuals are then written by one of two coders, named in
-the header: fixed width (every residual at the block's width) or **Golomb-Rice** (each residual
-paying for its own magnitude). Rice is worth 12 points on photographs and is the default via
-`Auto`, which costs both and takes the cheaper.
+minimum as a *base* and subtract it. The residuals are then written by one of three coders, named
+in the header: fixed width (every residual at the block's width), **Golomb-Rice** (each residual
+paying for its own magnitude), or **context-modelled Rice** (the same codes with the parameter
+derived per sample rather than stored, and no base at all). Rice is worth 12 points on photographs
+and is the default via `Auto`, which costs both of the first two and takes the cheaper. The third
+is worth another 1.6 and costs half the decode speed, so it is opt-in.
 
 ## Where truth lives
 
@@ -57,9 +59,16 @@ paying for its own magnitude). Rice is worth 12 points on photographs and is the
    2. Index by *slot* into `Header::coded_indices()`, never by raw channel number.
 8. **Decode order is fixed:** constants, blocks, unpredict, aliases. Unprediction reads neighbours
    the same loop has already restored, so it must run in raster order, and aliases must follow it.
-9. **Under Rice a block's payload size is not computable from its header.** Rice codes are
-   variable-length. Anything that used to skip a payload has to walk it instead.
-10. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
+9. **Under either Rice coder a block's payload size is not computable from its header.** Rice
+   codes are variable-length. Anything that used to skip a payload has to walk it instead — and
+   under the context coder the walk must run the model too, because each code's length depends on
+   the parameter the preceding samples produced.
+10. **The context model is normative, not a heuristic.** Under `block_coder` 2 the Rice parameter
+   is derived rather than stored, so encoder and decoder must compute it identically or the stream
+   desynchronises. Its constants live in `context.rs` and `FORMAT.md` §6.3 and nowhere else. This
+   is the one place where "the encoder may choose freely; it affects size, never correctness" does
+   *not* apply.
+11. **Experimental compression back-ends live in `brp-lab`,** never in the format. `brp-lab` exists
    to measure candidates; a pipeline earns its way into `FORMAT.md` by winning on the corpus, and
    then only with a version bump and an ADR.
 
@@ -76,17 +85,23 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Format version 4: whole-image channel reduction, optional spatial prediction, block packing with
-a choice of fixed-width or Golomb-Rice coding. Block size defaults to the whole image; it is
-already a parameter, so a block-size sweep works today. Prediction and coder both default to
-`Auto`, which measures rather than guesses.
+Format version 5: whole-image channel reduction, optional spatial prediction, block packing with a
+choice of three coders — fixed width, Golomb-Rice with a stored parameter, and Golomb-Rice with the
+parameter derived from a context of local gradients. Block size defaults to the whole image; it is
+already a parameter, so a block-size sweep works today. Prediction and coder both default to `Auto`,
+which measures rather than guesses.
+
+**`Auto` weighs the first two coders only.** The context coder is 1.6 points smaller on photographs
+and about half the decode speed, so it is opt-in — `--coder context`, or `CoderChoice::Context`.
+Selecting it on size alone would spend the codec's actual advantage without being asked; ADR 0009
+has the argument.
 
 **Compression at whole-image block size is expected to be poor on photographs** — the global
 min/max span nearly the full range, so the width code lands on 8 and nothing is saved. That is
 inherent to stage 2, not a bug to report. Gains appear at 8x8/16x16, and stage 1 handles the
 degenerate images regardless of block size.
 
-Not in the format, and not to be added without measurements from `brp-lab`: entropy coding,
+Not in the format, and not to be added without measurements from `brp-lab`: entropy coding, other
 predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode.
 
 **Before claiming anything about compression, read `docs/EXPERIMENTS.md`.** Two results there

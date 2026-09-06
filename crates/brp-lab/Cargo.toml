@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# The crate has extra binaries for one-off studies; `cargo run -p brp-lab` means the runner.
+default-run = "brp-lab"
 
 [dependencies]
 brp-core = { workspace = true }

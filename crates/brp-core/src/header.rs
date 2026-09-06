@@ -11,14 +11,18 @@ use crate::Result;
 /// Version-independent by design — the `version` byte is the single source of truth. See ADR 0004.
 pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 
-/// The only bit depth version 4 defines.
+/// The only bit depth version 5 defines.
 pub const BIT_DEPTH: u8 = 8;
 
 /// Width of the per-block parameter field: a width code under [`BLOCK_CODER_FIXED`], a Rice mode
-/// under [`BLOCK_CODER_RICE`]. Four bits either way.
+/// under [`BLOCK_CODER_RICE`]. Four bits either way. [`BLOCK_CODER_CONTEXT`] has no such field.
 pub const WIDTH_CODE_BITS: u32 = 4;
+
+/// Width of the per-block-channel escape flag under [`BLOCK_CODER_CONTEXT`]: 1 means every
+/// residual in it is zero and no payload follows.
+pub const ZERO_BLOCK_BITS: u32 = 1;
 
 /// Header length up to and including `channel_modes`, before aliases and constants.
 pub const HEADER_BASE_SIZE: usize = 27;
@@ -30,6 +34,9 @@ const CHANNEL_SECTION_AT: usize = 26;
 pub const BLOCK_CODER_FIXED: u8 = 0;
 /// Golomb-Rice with a per-block parameter. Smaller on predicted residuals.
 pub const BLOCK_CODER_RICE: u8 = 1;
+/// The same Rice codes with the parameter derived from a context instead of stored. Smallest, and
+/// the slowest to decode — see `FORMAT.md` 6.3 and ADR 0009.
+pub const BLOCK_CODER_CONTEXT: u8 = 2;
 
 /// Prediction is off: the block stream codes samples directly.
 pub const FILTER_MODE_NONE: u8 = 0;
@@ -46,7 +53,7 @@ pub struct Header {
     pub block_h: u32,
     /// [`FILTER_MODE_NONE`] or [`FILTER_MODE_ADAPTIVE`].
     pub filter_mode: u8,
-    /// [`BLOCK_CODER_FIXED`] or [`BLOCK_CODER_RICE`].
+    /// [`BLOCK_CODER_FIXED`], [`BLOCK_CODER_RICE`] or [`BLOCK_CODER_CONTEXT`].
     pub block_coder: u8,
     pub plan: ChannelPlan,
 }
@@ -144,7 +151,7 @@ impl Header {
         }
 
         let block_coder = bytes[25];
-        if block_coder > BLOCK_CODER_RICE {
+        if block_coder > BLOCK_CODER_CONTEXT {
             return Err(BrpError::UnsupportedBlockCoder(block_coder));
         }
 
@@ -234,7 +241,7 @@ mod tests {
     fn field_offsets_match_the_spec() {
         let bytes = encoded(&sample());
         assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-        assert_eq!(bytes[4], 4); // version
+        assert_eq!(bytes[4], 5); // version
         assert_eq!(bytes[5], 0); // flags
         assert_eq!(&bytes[6..10], &640u32.to_le_bytes());
         assert_eq!(&bytes[10..14], &480u32.to_le_bytes());
@@ -259,7 +266,7 @@ mod tests {
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedVersion {
                 found: 3,
-                expected: 4
+                expected: 5
             }
         );
     }
@@ -325,13 +332,19 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_block_coder() {
-        for coder in 2..=255u8 {
+        for coder in (BLOCK_CODER_CONTEXT + 1)..=255u8 {
             let mut bytes = encoded(&sample());
             bytes[25] = coder;
             assert_eq!(
                 Header::parse(&bytes).unwrap_err(),
                 BrpError::UnsupportedBlockCoder(coder)
             );
+        }
+        // The three the format does define must all parse.
+        for coder in [BLOCK_CODER_FIXED, BLOCK_CODER_RICE, BLOCK_CODER_CONTEXT] {
+            let mut bytes = encoded(&sample());
+            bytes[25] = coder;
+            assert_eq!(Header::parse(&bytes).unwrap().0.block_coder, coder);
         }
     }
 

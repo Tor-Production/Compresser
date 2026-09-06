@@ -67,12 +67,16 @@ fn opts_for(block: Option<u32>, filter: FilterChoice, coder: CoderChoice) -> Enc
     }
 }
 
-/// The stages worth separating: the plain packer, prediction alone, and both stages with Rice —
-/// which is what the format reaches for by default.
-const CONFIGS: [(&str, FilterChoice, CoderChoice); 3] = [
+/// The stages worth separating: the plain packer, prediction alone, both stages with Rice — which
+/// is what the format reaches for by default — and the context coder, which has to be asked for.
+///
+/// The first three rows are the control for a change to the context model: nothing in them runs
+/// it, so if they move, the machine moved.
+const CONFIGS: [(&str, FilterChoice, CoderChoice); 4] = [
     ("", FilterChoice::Off, CoderChoice::Fixed),
     ("+pred", FilterChoice::On, CoderChoice::Fixed),
     ("+pred+rice", FilterChoice::On, CoderChoice::Rice),
+    ("+pred+ctxrice", FilterChoice::On, CoderChoice::Context),
 ];
 
 fn bench_encode(c: &mut Criterion) {

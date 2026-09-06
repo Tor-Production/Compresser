@@ -13,6 +13,7 @@ use flate2::{write::DeflateEncoder, Compression};
 use std::io::Write;
 
 pub mod blockpack;
+pub mod context;
 pub mod filters;
 pub mod huffman;
 pub mod lzw;
@@ -110,6 +111,7 @@ impl Codec for Brp {
         let c = match self.coder {
             brp_core::CoderChoice::Fixed => "",
             brp_core::CoderChoice::Rice => ",rice",
+            brp_core::CoderChoice::Context => ",ctxrice",
             brp_core::CoderChoice::Auto => ",bestcoder",
         };
         format!("brp[{block}{f}{c}]{}", self.entropy.suffix())
@@ -359,6 +361,26 @@ impl Codec for Packed {
     }
 }
 
+/// A contextual Rice parameter over the format's own residuals. See [`context`].
+pub struct Contextual {
+    pub options: context::Options,
+    pub entropy: Entropy,
+}
+
+impl Codec for Contextual {
+    fn name(&self) -> String {
+        format!("{}{}", self.options.name(), self.entropy.suffix())
+    }
+
+    fn encode(&self, img: &RawImage) -> Result<Vec<u8>> {
+        self.entropy.pack(&context::encode(img, &self.options))
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<RawImage> {
+        context::decode(&self.entropy.unpack(bytes)?)
+    }
+}
+
 /// The pipelines the runner measures, in report order.
 pub fn all_codecs() -> Vec<Box<dyn Codec>> {
     use blockpack::BlockCoder;
@@ -439,6 +461,28 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
         coder: BlockCoder::Rice,
         block: 8,
         predict: false,
+        entropy: Entropy::None,
+    }));
+
+    // The context coder as the format now defines it, at the block size ADR 0009 measured it at.
+    // `Auto` never selects it, so it has to be asked for by name.
+    v.push(Box::new(Brp {
+        block: Some(32),
+        entropy: Entropy::None,
+        filter: FilterChoice::Auto,
+        coder: CoderChoice::Context,
+    }));
+
+    // And the prototype it came from, in the domain the format did *not* adopt, so the 0.18 points
+    // ADR 0009 turned down stay measurable rather than becoming a claim in a document.
+    v.push(Box::new(Contextual {
+        options: context::Options {
+            source: context::ContextSource::Sample,
+            block: Some(32),
+            base: false,
+            per_channel: false,
+            ..Default::default()
+        },
         entropy: Entropy::None,
     }));
     v

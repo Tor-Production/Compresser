@@ -31,6 +31,13 @@ mask on every call. Decode 1.2-1.9x depending on configuration; on the photograp
 configuration went from 60 MiB/s to **89**, against `filter+deflate`'s 105. Encode was untouched
 and served as the control. Output bit-identical, which is what the golden fixtures are for.
 
+**Context modelling for the Rice parameter** (format v5, ADR 0009) — a third block coder, with `k`
+derived per sample from quantised local gradients instead of stored per block. The parameter leaves
+the file entirely, and the model adapts inside a block rather than across blocks. Photographs go
+from 60.7% to **58.3%**, and on a 45-megapixel photograph BRP takes the lead over both PNG and WebP
+lossless. It is **not** the default: decode halves, and the floor is the model's serial dependency
+rather than the codes, so no bit-level work recovers it.
+
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, and the `residual-shape` tool that measures what the format actually
 emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
@@ -38,28 +45,37 @@ enough to have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Context modelling for the Rice parameter  ← next
-
-This is where JPEG-LS gets its remaining edge, and BRP has now converged on JPEG-LS's architecture
-by measurement rather than by imitation. Instead of one parameter per block, choose `k` from a
-context of quantised local gradients, so the model adapts *within* a block rather than only across
-blocks.
-
-Expect this to subsume much of what adaptive block size would have bought, which is why it comes
-first.
-
-### 2. Adaptive block size
-
-`quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure
-is now stale twice over: the model assumed fixed-width packing and has to be rewritten around
-Rice's cost, and the fixed grid it has to beat is no longer 8x8 — a 16x16 grid is 0.8 points
-better on the current corpus (finding 11). Re-measure before implementing.
-
-### 3. Better predictors
+### 1. Better predictors  ← next
 
 The five PNG predictors were adopted because they measured best among the variants tried, not
 because they are optimal. Worth testing: the gradient-adjusted predictor from LOCO-I/JPEG-LS, and
 choosing the predictor per block rather than per row.
+
+This moved to the front because version 5 built most of what it needs. The gradient-adjusted
+predictor reads the same three neighbours the context model already quantises, and JPEG-LS's bias
+correction is a second pair of counters beside `A` and `N`. Unlike the context model, a better
+predictor helps *every* coder, and costs decode speed only in the unprediction pass.
+
+### 2. Adaptive block size
+
+`quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure is
+now stale three times over: the model assumed fixed-width packing and has to be rewritten around
+Rice's cost; the fixed grid it has to beat is no longer 8x8, since a 16x16 grid is 0.8 points better
+(finding 11); and under the context coder the per-block header it was trading against is one bit
+rather than twelve, which is most of what made small blocks expensive. Finding 13 confirms the
+prediction finding 11 made — adaptation across block sizes has lost most of its force. Re-measure
+before implementing.
+
+### 3. Deciding what the documented configuration is
+
+Three block sizes now have a claim: the shipped default is the whole image, every table in
+`EXPERIMENTS.md` quotes 8x8, 16x16 is 0.8 points better under the stored-parameter coders
+(finding 11), and 32x32 is best under the context coder (finding 13). Nothing was changed on the
+strength of any of that, because moving the documented grid restates every figure on the page at
+once.
+
+That is a bookkeeping decision rather than a codec one, and it should be taken deliberately, in one
+commit, with the whole page re-measured — not drifted into.
 
 ## Later
 
@@ -82,8 +98,15 @@ choosing the predictor per block rather than per row.
   blocks where fixed width wins: 62.7% against plain Rice's 62.5%.
 - **An LZ77 stage inside the format.** Deflate on top of Rice gains 0.6 points. Not worth the
   implementation.
-- **Beating PNG on photographs by ratio alone.** `filter+deflate` sits at 59.2%; version 3 closed
-  the gap from 19 points to 15, and an entropy stage would close most of the rest. But every stage
-  added costs speed, and speed is this codec's actual advantage. Whether to chase ratio or defend
-  that advantage is a product decision, and it should be made deliberately rather than drifting
-  into a slower PNG.
+- **Beating PNG on the small photographs by ratio alone.** `filter+deflate` sits at 57.5% on the
+  eight; the default settings are 3.2 points behind and the context coder 0.8. Closing the last of
+  it means another stage, every stage costs speed, and speed is this codec's actual advantage.
+
+  Version 5 is what that product decision looks like when it is actually taken rather than drifted
+  into: the ratio is available, it is not the default, and the price is stated in the ADR. The same
+  answer should be given to whatever is proposed next.
+
+  Worth noting where the question stops applying. On a 45-megapixel photograph — the size real
+  photographs are — BRP already wins on ratio at default settings, 32.1% against PNG's 36.6% and
+  WebP lossless's 42.2%. The 768x512 crops the corpus is built from are not the case the codec is
+  losing at; they are the case it is *measured* at, because they are the case the literature uses.

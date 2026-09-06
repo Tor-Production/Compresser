@@ -2,8 +2,12 @@
 
 use crate::bitio::BitReader;
 use crate::block::{BlockGrid, BlockRect};
+use crate::context::{ContextModel, Plane};
 use crate::error::BrpError;
-use crate::header::{Header, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS};
+use crate::header::{
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS,
+    ZERO_BLOCK_BITS,
+};
 use crate::image::{required_len, MAX_CHANNELS};
 use crate::predict::{FILTER_KINDS, FILTER_KIND_BITS};
 use crate::rice;
@@ -11,6 +15,11 @@ use crate::Result;
 
 /// One block's coded parameters. Entries are indexed by *slot*, matching
 /// [`Header::coded_indices`], not by image channel.
+///
+/// Under `block_coder` 2 a block-channel has neither a base nor a parameter field, so `bases` is
+/// zero throughout and `width_codes` carries the escape bit — 1 where every residual in that
+/// block-channel is zero. The parameters that coder actually used are per sample, not per block,
+/// and reach the report through [`Analysis::width_code_histogram`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
     pub rect: BlockRect,
@@ -38,8 +47,10 @@ pub struct Analysis {
     pub padding_bits: u64,
     /// Bytes past the end of the bitstream, if any.
     pub trailing_bytes: usize,
-    /// `histogram[image channel][parameter]` — how often each per-block parameter was chosen.
-    /// A width code under the fixed coder, a Rice mode under Rice, so the index range differs.
+    /// `histogram[image channel][parameter]` — how often each parameter was used. A width code
+    /// under the fixed coder and a Rice mode under Rice, counted once per block; under the context
+    /// coder it is the derived Rice parameter, counted once per *sample*, since that is the unit
+    /// it varies over. The index range differs accordingly.
     pub width_code_histogram: [[u64; 10]; MAX_CHANNELS],
     pub blocks: Vec<BlockInfo>,
     /// Raw size of the image these bits reconstruct.
@@ -87,50 +98,63 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
             filter_bits = u64::from(header.height) * u64::from(FILTER_KIND_BITS);
         }
 
-        for rect in grid.iter() {
-            let mut info = BlockInfo {
-                rect,
-                bases: [0; MAX_CHANNELS],
-                width_codes: [0; MAX_CHANNELS],
-                coded: coded.len() as u8,
-            };
+        if header.block_coder == BLOCK_CODER_CONTEXT {
+            let (header_bits, bits) = walk_context_blocks(
+                &mut reader,
+                &header,
+                &coded,
+                &grid,
+                &mut histogram,
+                &mut blocks,
+            )?;
+            block_header_bits = header_bits;
+            payload_bits = bits;
+        } else {
+            for rect in grid.iter() {
+                let mut info = BlockInfo {
+                    rect,
+                    bases: [0; MAX_CHANNELS],
+                    width_codes: [0; MAX_CHANNELS],
+                    coded: coded.len() as u8,
+                };
 
-            let rice_coded = header.block_coder == BLOCK_CODER_RICE;
-            for slot in 0..coded.len() {
-                info.bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
-                let param = reader.read(WIDTH_CODE_BITS)?;
-                if rice_coded {
-                    rice::parameter_for(param)?;
-                } else if param > u32::from(header.bit_depth) {
-                    return Err(BrpError::InvalidWidthCode(param as u8));
-                }
-                info.width_codes[slot] = param as u8;
-                histogram[coded.channel(slot)][param as usize] += 1;
-            }
-            block_header_bits +=
-                coded.len() as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
-
-            let pixels = rect.pixel_count();
-            for slot in 0..coded.len() {
-                let param = u32::from(info.width_codes[slot]);
-                if rice_coded {
-                    // Rice codes are variable-length, so their size cannot be computed from the
-                    // parameter; the only way to measure the payload is to walk it.
-                    if let Some(k) = rice::parameter_for(param)? {
-                        let before = reader.bit_pos();
-                        for _ in 0..pixels {
-                            rice::read(&mut reader, k)?;
-                        }
-                        payload_bits += (reader.bit_pos() - before) as u64;
+                let rice_coded = header.block_coder == BLOCK_CODER_RICE;
+                for slot in 0..coded.len() {
+                    info.bases[slot] = reader.read(u32::from(header.bit_depth))? as u8;
+                    let param = reader.read(WIDTH_CODE_BITS)?;
+                    if rice_coded {
+                        rice::parameter_for(param)?;
+                    } else if param > u32::from(header.bit_depth) {
+                        return Err(BrpError::InvalidWidthCode(param as u8));
                     }
-                } else {
-                    let bits = pixels * u64::from(param);
-                    reader.skip(bits)?;
-                    payload_bits += bits;
+                    info.width_codes[slot] = param as u8;
+                    histogram[coded.channel(slot)][param as usize] += 1;
                 }
-            }
+                block_header_bits +=
+                    coded.len() as u64 * (u64::from(header.bit_depth) + u64::from(WIDTH_CODE_BITS));
 
-            blocks.push(info);
+                let pixels = rect.pixel_count();
+                for slot in 0..coded.len() {
+                    let param = u32::from(info.width_codes[slot]);
+                    if rice_coded {
+                        // Rice codes are variable-length, so their size cannot be computed from the
+                        // parameter; the only way to measure the payload is to walk it.
+                        if let Some(k) = rice::parameter_for(param)? {
+                            let before = reader.bit_pos();
+                            for _ in 0..pixels {
+                                rice::read(&mut reader, k)?;
+                            }
+                            payload_bits += (reader.bit_pos() - before) as u64;
+                        }
+                    } else {
+                        let bits = pixels * u64::from(param);
+                        reader.skip(bits)?;
+                        payload_bits += bits;
+                    }
+                }
+
+                blocks.push(info);
+            }
         }
 
         reader.verify_padding()?;
@@ -158,6 +182,65 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
         blocks,
         raw_bytes,
     })
+}
+
+/// Walks a `block_coder` 2 stream, returning its header and payload bits.
+///
+/// Under Rice the payload had to be walked because the codes are variable-length; under the
+/// context coder the walk must also *run the model*, since each code's length depends on the
+/// parameter the preceding samples produced. That means reconstructing the residual plane, which
+/// is the one place analysis stops being cheaper than decoding.
+fn walk_context_blocks(
+    reader: &mut BitReader,
+    header: &Header,
+    coded: &crate::channels::CodedIndices,
+    grid: &BlockGrid,
+    histogram: &mut [[u64; 10]; MAX_CHANNELS],
+    blocks: &mut Vec<BlockInfo>,
+) -> Result<(u64, u64)> {
+    let stride = usize::from(header.channels);
+    let plane = Plane::new(header.width, stride);
+    let mut model = ContextModel::new();
+    let mut residuals = vec![0u8; required_len(header.width, header.height, header.channels)?];
+    let mut header_bits = 0u64;
+    let mut payload_bits = 0u64;
+
+    for rect in grid.iter() {
+        let mut info = BlockInfo {
+            rect,
+            bases: [0; MAX_CHANNELS],
+            width_codes: [0; MAX_CHANNELS],
+            coded: coded.len() as u8,
+        };
+        for slot in 0..coded.len() {
+            info.width_codes[slot] = reader.read(ZERO_BLOCK_BITS)? as u8;
+        }
+        header_bits += coded.len() as u64 * u64::from(ZERO_BLOCK_BITS);
+
+        for slot in 0..coded.len() {
+            let channel = coded.channel(slot);
+            if info.width_codes[slot] == 1 {
+                continue; // no payload, and the model does not see these samples
+            }
+            let before = reader.bit_pos();
+            for row in 0..rect.h {
+                let y = rect.y + row;
+                let mut i = crate::encode::sample_index(header.width, stride, rect.x, y, channel);
+                for col in 0..rect.w {
+                    let context = plane.context(&residuals, rect.x + col, y, channel);
+                    let k = model.parameter(context);
+                    histogram[channel][k as usize] += 1;
+                    let v = rice::read(reader, k)?;
+                    model.update(context, v);
+                    residuals[i] = v as u8;
+                    i += stride;
+                }
+            }
+            payload_bits += (reader.bit_pos() - before) as u64;
+        }
+        blocks.push(info);
+    }
+    Ok((header_bits, payload_bits))
 }
 
 #[cfg(test)]

@@ -426,10 +426,107 @@ on which WebP has lost to PNG. A 45-megapixel landscape is smooth at pixel scale
 crop is not, which flatters a predictor; the optimum block size lands at 32x32 here against 16x16
 on the small photographs for the same reason.
 
+### 13. A derived Rice parameter is worth 1.6 points and half the decode speed
+
+Finding 11 ended with the argument for this stated as one number: 8x8 blocks spend 0.19 bits per
+sample naming a Rice parameter, and 16x16 blocks hand that back but lose 0.94 points of payload,
+because one parameter fits 256 samples less well than 64. Both costs exist only because `k` is a
+per-block constant.
+
+`ctx-sweep` prototyped the JPEG-LS alternative in `brp-lab`: quantise three local gradients into a
+context, keep a running mean of magnitudes per context, and derive `k` from it on both sides. The
+parameter then costs nothing and changes per sample.
+
+Sizes, prediction on, at the block size each row prefers:
+
+| Pipeline | Photographs | Synthetic | 130 MiB photograph |
+|---|---:|---:|---:|
+| `filter+deflate` | **57.5%** | **22.9%** | 35.3% |
+| **context, 32x32** | 58.3% | 26.9% | **31.6%** |
+| `brp[16x16,auto,bestcoder]` | 59.9% | 26.0% | 32.1% |
+| `brp[8x8,auto,bestcoder]` | 60.7% | 26.7% | 33.6% |
+
+**1.6 points against the best fixed block size, 2.4 against the documented one**, and the gap to
+PNG's approach on the photographs closes from 2.4 points to 0.8. On the 45-megapixel photograph it
+takes the lead outright, by 3.7 points over `filter+deflate`.
+
+Four knobs were swept, and three of them moved the design away from the textbook.
+
+| Knob | Tried | Result |
+|---|---|---|
+| Quantiser thresholds | nine sets, 1/2/4 through 8/24/64 | best 58.42% against 3/7/21's 58.45%. **Keep JPEG-LS's.** |
+| Zero-block escape | one bit per block-channel, or none | costs 0.01 on photographs, saves 0.33 on synthetic. **Keep.** |
+| Per-block base | keep, or drop | dropping saves 0.09-0.25. **Drop.** |
+| Model per channel | shared, or one each | shared is 0.25 better. **Share.** |
+
+The threshold answer is the useful one: tuning them on the corpus buys 0.03 points, which is
+nothing, but the *scale* is worth 0.63 — 1/2/4 is much worse than 3/7/21. So they belong in the
+format as constants rather than in the header as a choice.
+
+Dropping the base is the surprise. It is stage 2's defining field, and here it hurts: the context
+is measured over the stored residuals while the coded value would be the residual *minus* the base,
+so the model's input and its output stop being the same quantity. Without the base they are.
+
+#### Which neighbours the context reads
+
+Two domains were built and measured, because the roadmap named one and the corpus did not clearly
+agree with it.
+
+| | Photographs | Synthetic | 130 MiB photograph |
+|---|---:|---:|---:|
+| `loco` — gradients between reconstructed samples | **58.10%** | 26.93% | 31.65% |
+| `resid` — the neighbouring prediction errors | 58.28% | **26.86%** | **31.60%** |
+
+LOCO-I's own domain wins the small photographs by 0.18 points and loses the large one by 0.05.
+That is a tie, and `loco` costs a change to the reconstruction order of section 7 — contexts over
+reconstructed samples force the decoder to undo prediction inside the block loop. The format took
+`resid`, which reorders nothing. See ADR 0009.
+
+#### The speed, and where it goes
+
+At 8x8 with prediction pinned on, so only the coder differs:
+
+| 512x512 | Rice encode | Context encode | Rice decode | Context decode |
+|---|---:|---:|---:|---:|
+| noise RGB | 46 MiB/s | 30 | 78 | 37 |
+| narrow-band RGB | 51 | 39 | 146 | 55 |
+
+Decode roughly halves. To find out whether that is the codes or the model, the prototype's decoder
+was run a second way: same loop, same contexts, same parameter lookups and model updates, with the
+bit reader replaced by a replay of residuals recorded during encoding. It reaches only 48-55 MiB/s
+on the photographs. **The floor is the model, not the codes** — no work on `bitio.rs` can recover
+this, because every sample's parameter depends on the samples before it.
+
+One more thing the numbers show: the context coder's rate barely moves with the machine. Across
+four runs it decoded the photographs at 35, 36, 36 and 36 MiB/s while `brp[16x16]` gave 71 to 95 in
+those same runs. A dependency-bound loop does not compete for what a memory-bound one competes for.
+The gap is 2.1x on a warm machine and 2.7x on a cold one, so no single ratio should be read too
+precisely.
+
+That is why the coder is **not** the default and `Auto` never selects it. As the default, BRP would
+decode at roughly a third of `filter+deflate`'s rate while still being 0.8 points larger on the
+photographs, which is exactly the drift into a slower PNG the roadmap warns against.
+
+#### The bug that inverted the answer
+
+The first implementation measured 61.10% against the shipped coder's 60.69% — the context model was
+*worse* than the per-block field it was meant to replace, which very nearly ended the experiment.
+
+The cause was one line. JPEG-LS accumulates the magnitude of the prediction error into `A[q]`, and
+codes twice that magnitude. Our coded value is already the doubled form, because that is what
+zigzag produces. Feeding it in raw makes `A / N` twice what the rule expects, and every parameter
+comes out one step too high. Halving it back — `A += (v + 1) >> 1` — is worth **2.65 points**.
+
+The lesson is narrower than finding 3's and worth stating anyway: when a rule is borrowed from
+another codec, the quantity it is defined over has to be borrowed with it. A parameter that is one
+step off is still a *valid* parameter, so nothing fails, the round trip stays lossless, and the only
+symptom is a number that is slightly too large.
+
 ## Adopted into the format
 
-Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007). On the
-photographs, at 8x8 blocks, with default settings:
+Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007), the
+context-modelled Rice parameter in version 5 (ADR 0009). On the original six photographs, at 8x8
+blocks, with default settings:
 
 | | v2 | v3 | v4 |
 |---|---:|---:|---:|
@@ -437,7 +534,20 @@ photographs, at 8x8 blocks, with default settings:
 | with Deflate on top | 75.0% | 65.6% | 61.6% |
 
 The v4 figure reproduces the lab prototype exactly (62.5%), so the move from experiment to format
-cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
+cost nothing. The gap to PNG's `filter+deflate` was 3.3 points.
+
+Version 5 adds a coder rather than changing what the default produces, so those figures still stand
+and a default-settings file is byte-identical to what version 4 wrote but for the version byte. On
+the current eight photographs:
+
+| | default | `--coder context` at 32x32 |
+|---|---:|---:|
+| Photographs | 60.7% | **58.3%** |
+| Synthetic | 26.7% | 26.9% |
+| 130 MiB photograph | 33.6% | **31.6%** |
+
+The context coder reproduces its lab prototype to the decimal on all three, so version 5 cost
+nothing in the move either.
 
 ## What this says to do next
 
@@ -447,11 +557,15 @@ cost nothing. The gap to PNG's `filter+deflate` is now 3.3 points.
    changing an output bit. On the six-photograph corpus the shipped configuration measures
    27 MiB/s encoding and 89 decoding, against `filter+deflate`'s 10 and 105; on the current eight,
    24 and 80 against 9 and 96.
-4. **Context modelling for the Rice parameter.** This is where JPEG-LS gets its remaining edge:
-   choose `k` from quantised local gradients rather than per block, so the model adapts within a
-   block instead of across it.
-5. **Adaptive block size.** Still real, still the smallest, and its cost model assumed fixed-width
-   packing — it has to be rewritten around Rice before the 4-point figure means anything.
+4. ~~Context modelling for the Rice parameter.~~ Done, version 5, as an opt-in coder rather than
+   the default: 1.6 points against the best fixed block size, at half the decode speed (finding 13).
+5. **Adaptive block size.** Weaker than it was. Finding 11 predicted context modelling would take
+   most of its force, and finding 13 confirms it: the header cost that made small blocks expensive
+   is gone under coder 2, and the payload penalty that made large blocks expensive *was* the
+   per-block parameter. Its cost model still assumes fixed-width packing and still has to be
+   rewritten before the 4-point figure means anything.
+6. **Better predictors.** Now the largest untried item, and the context machinery version 5 added
+   is most of what LOCO-I's gradient-adjusted predictor needs.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
 per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage

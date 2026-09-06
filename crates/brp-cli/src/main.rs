@@ -58,7 +58,10 @@ enum CoderArg {
     Fixed,
     /// Golomb-Rice with a per-block parameter. Smaller on predicted residuals.
     Rice,
-    /// Cost both and take the cheaper.
+    /// Golomb-Rice with the parameter derived from a context instead of stored. Smallest, and
+    /// roughly a third of the decode speed — see ADR 0009.
+    Context,
+    /// Cost fixed width and Rice, and take the cheaper. Never picks `context`.
     Auto,
 }
 
@@ -67,6 +70,7 @@ impl From<CoderArg> for CoderChoice {
         match a {
             CoderArg::Fixed => CoderChoice::Fixed,
             CoderArg::Rice => CoderChoice::Rice,
+            CoderArg::Context => CoderChoice::Context,
             CoderArg::Auto => CoderChoice::Auto,
         }
     }
@@ -208,7 +212,8 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     let h = &a.header;
     let blocks = a.blocks.len();
     let coded = h.coded_indices();
-    let rice = h.block_coder == brp_core::BLOCK_CODER_RICE;
+    let context = h.block_coder == brp_core::BLOCK_CODER_CONTEXT;
+    let rice = h.block_coder == brp_core::BLOCK_CODER_RICE || context;
 
     println!("header");
     println!("  version        {}", brp_core::VERSION);
@@ -230,7 +235,11 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     );
     println!(
         "  block coder    {}",
-        if rice { "golomb-rice" } else { "fixed width" }
+        match h.block_coder {
+            brp_core::BLOCK_CODER_CONTEXT => "golomb-rice, parameter from context",
+            brp_core::BLOCK_CODER_RICE => "golomb-rice",
+            _ => "fixed width",
+        }
     );
 
     println!("\nchannel plan (stage 1)");
@@ -296,6 +305,13 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     } else {
         ("width codes chosen (bits per sample)", 8)
     };
+    // Under the context coder the parameter is per sample, not per block, so the same histogram
+    // counts something else and says so.
+    let (label, top) = if context {
+        ("rice parameters derived, per sample", 8usize)
+    } else {
+        (label, top)
+    };
     println!("\n{label}");
     print!("  {:<10}", "channel");
     for code in 0..=top {
@@ -325,12 +341,21 @@ fn print_info(a: &Analysis, list_blocks: usize) {
             "y",
             "w",
             "h",
-            "base",
-            if rice { "rice mode" } else { "bits/sample" }
+            if context { "-" } else { "base" },
+            match h.block_coder {
+                brp_core::BLOCK_CODER_CONTEXT => "all-zero escape",
+                brp_core::BLOCK_CODER_RICE => "rice mode",
+                _ => "bits/sample",
+            }
         );
         for b in a.blocks.iter().take(shown) {
             let n = usize::from(b.coded);
-            let bases: Vec<String> = b.bases[..n].iter().map(u8::to_string).collect();
+            // Coder 2 stores no base at all, so printing a column of zeros would invent one.
+            let bases: Vec<String> = if context {
+                vec!["-".to_string()]
+            } else {
+                b.bases[..n].iter().map(u8::to_string).collect()
+            };
             let widths: Vec<String> = b.width_codes[..n].iter().map(u8::to_string).collect();
             println!(
                 "  {:>6} {:>6} {:>6} {:>6}   {:<24} {:<20}",

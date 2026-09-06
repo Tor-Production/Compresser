@@ -317,7 +317,11 @@ fn invalid_filter_kinds_are_rejected() {
     }
 }
 
-/// Every possible `block_coder` byte. Only 0 and 1 exist; the rest must be refused.
+/// Every possible `block_coder` byte. Only 0, 1 and 2 exist; the rest must be refused.
+///
+/// Relabelling a fixed-width file as coder 1 or 2 is not itself an error — the bits are then read
+/// under different rules and either run out or do not. What must hold is that `decode` and
+/// `analyze` reach the same verdict, and that neither panics.
 #[test]
 fn arbitrary_block_coders() {
     let original = sample_file();
@@ -331,11 +335,71 @@ fn arbitrary_block_coders() {
             analyzed.is_ok(),
             "decode and analyze disagree on block coder {coder}"
         );
-        if coder > 1 {
-            assert!(matches!(
-                decoded.unwrap_err(),
-                BrpError::UnsupportedBlockCoder(_)
-            ));
+        if coder > 2 {
+            assert_eq!(decoded.unwrap_err(), BrpError::UnsupportedBlockCoder(coder));
+        }
+    }
+}
+
+/// A context-coded stream has no field a file can get wrong — every parameter is derived — so
+/// truncation is the only way to malform one. `FORMAT.md` section 9 says so; this checks it.
+#[test]
+fn truncated_context_streams_are_rejected() {
+    let data: Vec<u8> = (0..(8 * 8 * 3)).map(|i| (i * 11 % 251) as u8).collect();
+    let src = RawImage::new(8, 8, 3, data).unwrap();
+    let bytes = encode(
+        &src,
+        &EncodeOptions {
+            block_size: Some((4, 4)),
+            channels: ALL_CODED,
+            filter: FilterChoice::On,
+            coder: CoderChoice::Context,
+        },
+    )
+    .unwrap();
+    assert_eq!(decode(&bytes).unwrap(), src);
+
+    for cut in BODY_AT..bytes.len() {
+        let short = &bytes[..cut];
+        assert!(
+            decode(short).is_err(),
+            "truncation to {cut} bytes should fail"
+        );
+        assert_eq!(
+            decode(short).is_ok(),
+            analyze(short).is_ok(),
+            "decode and analyze disagree at {cut} bytes"
+        );
+    }
+}
+
+/// Every bit of a context-coded body, flipped one at a time. The parameter is derived from data
+/// the file no longer controls directly, so a flipped bit must still land on an error or on some
+/// other image — never on a panic, and never on a disagreement between the two walkers.
+#[test]
+fn corrupt_context_bodies_never_panic() {
+    let data: Vec<u8> = (0..(6 * 5 * 4)).map(|i| (i * 7 % 251) as u8).collect();
+    let src = RawImage::new(6, 5, 4, data).unwrap();
+    let original = encode(
+        &src,
+        &EncodeOptions {
+            block_size: Some((2, 2)),
+            channels: ALL_CODED,
+            filter: FilterChoice::Off,
+            coder: CoderChoice::Context,
+        },
+    )
+    .unwrap();
+
+    for byte in BODY_AT..original.len() {
+        for bit in 0..8 {
+            let mut bytes = original.clone();
+            bytes[byte] ^= 1 << bit;
+            assert_eq!(
+                decode(&bytes).is_ok(),
+                analyze(&bytes).is_ok(),
+                "decode and analyze disagree on byte {byte} bit {bit}"
+            );
         }
     }
 }

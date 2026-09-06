@@ -41,7 +41,12 @@ const CHANNEL_OPTIONS: &[ChannelOptions] = &[
 const FILTERS: &[FilterChoice] = &[FilterChoice::Off, FilterChoice::On, FilterChoice::Auto];
 
 /// Every block coder, likewise.
-const CODERS: &[CoderChoice] = &[CoderChoice::Fixed, CoderChoice::Rice, CoderChoice::Auto];
+const CODERS: &[CoderChoice] = &[
+    CoderChoice::Fixed,
+    CoderChoice::Rice,
+    CoderChoice::Context,
+    CoderChoice::Auto,
+];
 
 fn assert_round_trips(src: &RawImage) {
     for &block_size in BLOCK_SIZES {

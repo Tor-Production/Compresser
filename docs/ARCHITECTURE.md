@@ -23,7 +23,9 @@ image.rs    RawImage { width, height, channels, data: Vec<u8> }
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
 channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
 predict.rs  Stage 1.5 — per-row predictor choice and zigzagged residuals.
-rice.rs     Golomb-Rice codes and per-block parameter choice, one of two block coders.
+rice.rs     Golomb-Rice codes and per-block parameter choice, two of the three block coders.
+context.rs  The quantised-gradient context model that derives the parameter for the third.
+            Normative: encoder and decoder must agree bit for bit. FORMAT.md §6.3.
 header.rs   Header struct, write_to()/parse(). Byte-aligned, little-endian.
 block.rs    BlockGrid — iterator over clipped block rectangles.
 encode.rs   Stage 2 — scan_block() -> per-channel base/width_code, then emit.
@@ -43,9 +45,23 @@ list — an RGB image whose green aliases red codes channels 0 and 2. Every loop
 *slot* into `Header::coded_indices()`, never by raw channel number. Getting this wrong produces a
 codec that works on RGB and silently corrupts RGBA.
 
-Two block coders share the same per-block 4-bit field: a width code under fixed packing, a Rice
-mode under Rice. Under Rice the payload is variable-length, so nothing may assume a block's size
-can be computed from its header — `analyze` has to walk the codes rather than skip them.
+Two of the three block coders share the same per-block 4-bit field: a width code under fixed
+packing, a Rice mode under Rice. The third, the context coder, has neither that field nor a base —
+its parameter is derived from neighbours both sides can see, and its only per-block-channel header
+is a one-bit all-zero escape.
+
+Under either Rice coder the payload is variable-length, so nothing may assume a block's size can be
+computed from its header — `analyze` has to walk the codes rather than skip them. Under the context
+coder it has to run the model while walking, because each code's length depends on the parameter the
+preceding samples produced. That makes `analyze` roughly as expensive as decoding there, which is
+the one place its "cheaper than decode" property does not hold.
+
+The context model is shared mutable state threaded through the whole block stream, which is unlike
+everything else in the codec: every other per-block quantity is read from the file. Three rules keep
+it honest. It is created once per encode or decode and never reset. It is advanced exactly once per
+*coded* residual, so an escaped block-channel must advance nothing. And its constants live in
+`context.rs` and in `FORMAT.md` §6.3 and nowhere else — an encoder that varies them produces files
+that do not decode, which is a sharper failure than the usual "affects size, never correctness".
 
 The decode order is not a preference: constants, then blocks, then unpredict, then aliases.
 Unprediction must run in raster order because each prediction reads neighbours the same loop has

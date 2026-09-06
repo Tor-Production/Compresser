@@ -24,6 +24,7 @@ fn arb_coder() -> impl Strategy<Value = CoderChoice> {
     prop_oneof![
         Just(CoderChoice::Fixed),
         Just(CoderChoice::Rice),
+        Just(CoderChoice::Context),
         Just(CoderChoice::Auto),
     ]
 }
@@ -132,6 +133,11 @@ proptest! {
         let rice = encode(&src, &base(CoderChoice::Rice)).unwrap().len();
         let auto = encode(&src, &base(CoderChoice::Auto)).unwrap().len();
         prop_assert_eq!(auto, fixed.min(rice));
+
+        // And `Auto` weighs only those two. The context coder is often smaller than both, and
+        // still must not be reached for: it costs most of the decode speed. See ADR 0009.
+        let bytes = encode(&src, &base(CoderChoice::Auto)).unwrap();
+        prop_assert_ne!(bytes[25], brp_core::BLOCK_CODER_CONTEXT);
     }
 
     /// Arbitrary bytes must never panic the decoder, whatever they happen to say.

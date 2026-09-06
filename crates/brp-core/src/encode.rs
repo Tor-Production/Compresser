@@ -3,10 +3,11 @@
 use crate::bitio::BitWriter;
 use crate::block::{BlockGrid, BlockRect};
 use crate::channels::{self, ChannelOptions};
+use crate::context::{ContextModel, Plane};
 use crate::error::BrpError;
 use crate::header::{
-    Header, BIT_DEPTH, BLOCK_CODER_FIXED, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE,
-    HEADER_BASE_SIZE, WIDTH_CODE_BITS,
+    Header, BIT_DEPTH, BLOCK_CODER_CONTEXT, BLOCK_CODER_FIXED, BLOCK_CODER_RICE,
+    FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
 };
 use crate::image::{RawImage, MAX_CHANNELS};
 use crate::predict::{self, FILTER_KIND_BITS};
@@ -32,7 +33,12 @@ pub enum CoderChoice {
     Fixed,
     /// Golomb-Rice with a per-block parameter. Smaller on predicted residuals.
     Rice,
-    /// Cost both over the same blocks and take the cheaper. One extra scan, not a second encode.
+    /// The Rice codes with the parameter derived per sample from a context instead of stored per
+    /// block. Smallest, and roughly a third of the decode speed — see ADR 0009. Never chosen by
+    /// [`CoderChoice::Auto`]: it is a deliberate trade of speed for ratio, not a free win.
+    Context,
+    /// Cost fixed width and Rice over the same blocks and take the cheaper. One extra scan, not a
+    /// second encode. Does not consider [`CoderChoice::Context`].
     #[default]
     Auto,
 }
@@ -157,7 +163,7 @@ fn cheaper_coder(
     }
 }
 
-/// Encodes an image into a BRP v4 bitstream.
+/// Encodes an image into a BRP v5 bitstream.
 pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     match opts.filter {
         FilterChoice::Off => encode_with_filter(img, opts, false),
@@ -211,6 +217,7 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
         match opts.coder {
             CoderChoice::Fixed => BLOCK_CODER_FIXED,
             CoderChoice::Rice => BLOCK_CODER_RICE,
+            CoderChoice::Context => BLOCK_CODER_CONTEXT,
             CoderChoice::Auto => cheaper_coder(data, img.width(), stride, &coded, &grid),
         }
     };
@@ -245,6 +252,12 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
     // The per-row predictors come first, so a decoder has them before it needs them.
     for &kind in &kinds {
         writer.write(u32::from(kind), FILTER_KIND_BITS);
+    }
+
+    if block_coder == BLOCK_CODER_CONTEXT {
+        write_context_blocks(&mut writer, data, img.width(), stride, &coded, &grid);
+        out.extend_from_slice(&writer.finish());
+        return Ok(out);
     }
 
     let mut bases = [0u8; MAX_CHANNELS];
@@ -296,6 +309,67 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
 
     out.extend_from_slice(&writer.finish());
     Ok(out)
+}
+
+/// Emits every block under `block_coder` 2. See `FORMAT.md` section 6.3.
+///
+/// There is no base and no parameter field here, so the residual written is the plane's own byte
+/// and the only per-block-channel header is one escape bit. The model must meet the samples in
+/// exactly the order the decoder will, which is why this walks the grid rather than the image.
+fn write_context_blocks(
+    writer: &mut BitWriter,
+    data: &[u8],
+    img_w: u32,
+    stride: usize,
+    coded: &crate::channels::CodedIndices,
+    grid: &BlockGrid,
+) {
+    let plane = Plane::new(img_w, stride);
+    let mut model = ContextModel::new();
+    let mut all_zero = [false; MAX_CHANNELS];
+
+    for rect in grid.iter() {
+        let flags = &mut all_zero[..coded.len()];
+        for (slot, zero) in flags.iter_mut().enumerate() {
+            *zero = block_is_zero(data, &plane, &rect, coded.channel(slot));
+        }
+        for &zero in flags.iter() {
+            writer.write(u32::from(zero), ZERO_BLOCK_BITS);
+        }
+
+        for (slot, &zero) in all_zero[..coded.len()].iter().enumerate() {
+            if zero {
+                continue; // the escape said so; the model does not see these samples
+            }
+            let channel = coded.channel(slot);
+            for row in 0..rect.h {
+                let y = rect.y + row;
+                let mut i = sample_index(img_w, stride, rect.x, y, channel);
+                for col in 0..rect.w {
+                    let x = rect.x + col;
+                    let context = plane.context(data, x, y, channel);
+                    let v = u32::from(data[i]);
+                    rice::write(writer, v, model.parameter(context));
+                    model.update(context, v);
+                    i += stride;
+                }
+            }
+        }
+    }
+}
+
+/// Whether every residual of one channel in one block is zero, which the escape bit reports.
+fn block_is_zero(data: &[u8], plane: &Plane, rect: &BlockRect, channel: usize) -> bool {
+    for row in 0..rect.h {
+        let mut i = sample_index(plane.width, plane.stride, rect.x, rect.y + row, channel);
+        for _ in 0..rect.w {
+            if data[i] != 0 {
+                return false;
+            }
+            i += plane.stride;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

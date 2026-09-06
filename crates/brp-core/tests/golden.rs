@@ -54,7 +54,7 @@ fn rgba_with_constant_channels() {
     let expected: Vec<u8> = vec![
         // -- header, 29 bytes --
         b'B', b'R', b'P', 0x1A,
-        4,                      // version
+        5,                      // version
         0,                      // flags
         2, 0, 0, 0,             // width
         2, 0, 0, 0,             // height
@@ -89,7 +89,7 @@ fn constant_grayscale_is_header_only() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        4,
+        5,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -133,7 +133,7 @@ fn grayscale_carried_in_rgb() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        4,
+        5,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -184,7 +184,7 @@ fn prediction_and_zigzag() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        4,
+        5,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -239,7 +239,7 @@ fn rice_coded_block() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        4,
+        5,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -302,6 +302,140 @@ fn rice_constant_block_has_no_payload() {
     assert_eq!(a.width_code_histogram[0][0], 4, "four blocks, all mode 0");
 }
 
+/// 2x2 grayscale under the context coder, pinning the derived parameter and the whole model.
+///
+/// Samples 10, 12, 14, 16, prediction off, so the residual plane *is* the samples and there is no
+/// base to subtract. Part 1 is one escape bit; the block is not all zero, so it is 0.
+///
+/// Every parameter below is derived by section 6.3, never read. A fresh context has A = 4 and
+/// N = 1, and `k` is the smallest with `N << k >= A`, so an unseen context always gives k = 2.
+///
+///   (0,0) = 10  neighbours all outside the image, so every gradient is 0
+///               context (0,0,0) -> 364, k = 2; 10 >> 2 = 2, low bits 2  -> `11` `0` `10`
+///   (1,0) = 12  left 10 -> err 5 -> Q 2; above and upper-left absent
+///               context (0,0,2) -> 366, k = 2; 12 >> 2 = 3, low bits 0  -> `111` `0` `00`
+///   (0,1) = 14  above 10 -> err 5 -> Q 2; left and upper-left absent
+///               context (2,0,0) -> 526, k = 2; 14 >> 2 = 3, low bits 2  -> `111` `0` `10`
+///   (1,1) = 16  above 12 -> err 6 -> Q 2, upper-left 10 -> err 5 -> Q 2, left 14 -> err 7 -> Q 2
+///               context (2,2,2) -> 546, k = 2; 16 >> 2 = 4, low bits 0  -> `1111` `0` `00`
+///
+/// Each sample lands in a context of its own, so none of them sees an updated counter. The four
+/// updates still happen — `A += (v + 1) >> 1` — they just fall on contexts nothing else reaches.
+///
+/// Body bits, 25 of them plus 7 of padding:
+///   0 | 11010 | 111000 | 111010 | 1111000
+#[test]
+fn context_coded_block() {
+    let src = RawImage::new(2, 2, 1, vec![10, 12, 14, 16]).unwrap();
+
+    #[rustfmt::skip]
+    let expected: Vec<u8> = vec![
+        b'B', b'R', b'P', 0x1A,
+        5,
+        0,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+        1,                      // channels
+        8,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+        0,                      // filter mode: none
+        2,                      // block coder: context-modelled Golomb-Rice
+        0x00,                   // channel modes: coded
+        // -- body, 4 bytes --
+        0x6B, 0x8E, 0xBC, 0x00,
+    ];
+
+    let opts = EncodeOptions {
+        coder: CoderChoice::Context,
+        ..plain(None)
+    };
+    let actual = encode(&src, &opts).unwrap();
+    assert_eq!(
+        actual, expected,
+        "
+  actual: {actual:02X?}
+expected: {expected:02X?}"
+    );
+    assert_eq!(actual.len(), 31);
+    assert_eq!(decode(&expected).unwrap(), src);
+
+    // `Auto` must not reach for this coder, however the sizes fall.
+    let auto = EncodeOptions {
+        coder: CoderChoice::Auto,
+        ..plain(None)
+    };
+    assert_eq!(
+        encode(&src, &auto).unwrap()[25],
+        0,
+        "Auto stays off coder 2"
+    );
+}
+
+/// 4x1 grayscale in two 2x1 blocks, pinning the escape bit, sign folding, and the rule that an
+/// escaped block-channel advances nothing.
+///
+/// Samples 0, 0, 5, 7. The channel is not constant, so stage 1 leaves it coded; the first block is
+/// all zero and takes the escape.
+///
+///   block 0  escape bit 1, no payload, no model update
+///   block 1  escape bit 0
+///     (2,0) = 5  left is the escaped 0, above and upper-left outside
+///                context (0,0,0) -> 364, k = 2; 5 >> 2 = 1, low bits 1   -> `1` `0` `01`
+///                update: A[364] = 4 + 3 = 7, N[364] = 2
+///     (3,0) = 7  left 5 -> err -3 -> Q -1. The first non-zero quantised gradient is negative, so
+///                all three are negated: (0,0,-1) folds to (0,0,1) -> 365, a context of its own,
+///                so k = 2 again; 7 >> 2 = 1, low bits 3               -> `1` `0` `11`
+///
+/// Body bits, 10 of them plus 6 of padding:
+///   1 | 0 | 1001 | 1011
+#[test]
+fn context_coded_escape_and_sign_folding() {
+    let src = RawImage::new(4, 1, 1, vec![0, 0, 5, 7]).unwrap();
+
+    #[rustfmt::skip]
+    let expected: Vec<u8> = vec![
+        b'B', b'R', b'P', 0x1A,
+        5,
+        0,
+        4, 0, 0, 0,             // width
+        1, 0, 0, 0,             // height
+        1,                      // channels
+        8,
+        2, 0, 0, 0,             // block_w
+        1, 0, 0, 0,             // block_h
+        0,                      // filter mode: none
+        2,                      // block coder: context-modelled Golomb-Rice
+        0x00,                   // channel modes: coded
+        // -- body, 2 bytes --
+        0xA6, 0xC0,
+    ];
+
+    let opts = EncodeOptions {
+        coder: CoderChoice::Context,
+        ..plain(Some((2, 1)))
+    };
+    let actual = encode(&src, &opts).unwrap();
+    assert_eq!(
+        actual, expected,
+        "
+  actual: {actual:02X?}
+expected: {expected:02X?}"
+    );
+    assert_eq!(actual.len(), 29);
+    assert_eq!(decode(&expected).unwrap(), src);
+
+    // The escape is one bit per block-channel, against the four a Rice mode field spends.
+    let a = brp_core::analyze(&expected).unwrap();
+    assert_eq!(a.block_header_bits, 2, "two blocks, one bit each");
+    assert_eq!(a.blocks[0].width_codes[0], 1, "first block escaped");
+    assert_eq!(a.blocks[1].width_codes[0], 0);
+    assert_eq!(
+        a.width_code_histogram[0][2], 2,
+        "both coded samples derived k = 2"
+    );
+}
+
 /// Locks the header field offsets in `FORMAT.md` section 3 against accidental reordering.
 #[test]
 fn header_field_offsets() {
@@ -311,7 +445,7 @@ fn header_field_offsets() {
     let bytes = encode(&src, &plain(Some((2, 4)))).unwrap();
 
     assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-    assert_eq!(bytes[4], 4);
+    assert_eq!(bytes[4], 5);
     assert_eq!(bytes[5], 0);
     assert_eq!(&bytes[6..10], &5u32.to_le_bytes());
     assert_eq!(&bytes[10..14], &1u32.to_le_bytes());
