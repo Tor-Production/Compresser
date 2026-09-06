@@ -576,7 +576,8 @@ mod tests {
                     ((x * 7 + y * 13 + u32::from(c) * 29) ^ (x * y)) as u8
                 });
                 let idx = coded(ch);
-                let (want_kinds, want) = apply_prediction(&src, w, h, stride, &idx);
+                let (want_kinds, want) =
+                    apply_prediction(brp_core::FilterLayout::Row, &src, w, h, stride, &idx);
                 let (got_kinds, got) = apply(Variant::shipped(), &src, w, h, stride, &idx);
                 assert_eq!(got_kinds, want_kinds, "{w}x{h}x{ch}");
                 assert_eq!(got, want, "{w}x{h}x{ch}");

@@ -32,7 +32,7 @@ fn arb_coder() -> impl Strategy<Value = CoderChoice> {
 fn arb_filter() -> impl Strategy<Value = FilterChoice> {
     prop_oneof![
         Just(FilterChoice::Off),
-        Just(FilterChoice::On),
+        Just(FilterChoice::Row),
         Just(FilterChoice::Auto),
     ]
 }
@@ -115,7 +115,7 @@ proptest! {
             coder: CoderChoice::Fixed,
         };
         let off = encode(&src, &base(FilterChoice::Off)).unwrap().len();
-        let on = encode(&src, &base(FilterChoice::On)).unwrap().len();
+        let on = encode(&src, &base(FilterChoice::Row)).unwrap().len();
         let auto = encode(&src, &base(FilterChoice::Auto)).unwrap().len();
         prop_assert_eq!(auto, on.min(off));
     }

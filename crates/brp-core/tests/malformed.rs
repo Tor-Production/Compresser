@@ -262,7 +262,12 @@ fn alias_validation() {
     assert_eq!(decode(&bytes).unwrap_err(), BrpError::AliasOnFirstChannel);
 }
 
-/// Every possible `filter_mode` byte. Only 0 and 1 exist; the rest must be refused.
+/// Every possible `filter_mode` byte. Only 0, 1 and 2 exist; the rest must be refused.
+///
+/// The three that exist are *not* asserted to decode: flipping the byte of a file that was written
+/// without prediction claims kind codes the body never carried, and everything after them is then
+/// read at the wrong offset. What must hold there is the weaker property this test opens with —
+/// `decode` and `analyze` agree — because they walk the same structure.
 #[test]
 fn arbitrary_filter_modes() {
     let original = sample_file();
@@ -276,7 +281,7 @@ fn arbitrary_filter_modes() {
             analyzed.is_ok(),
             "decode and analyze disagree on filter mode {mode}"
         );
-        if mode > 1 {
+        if mode > 2 {
             assert!(matches!(
                 decoded.unwrap_err(),
                 BrpError::UnsupportedFilterMode(_)
@@ -295,7 +300,7 @@ fn invalid_filter_kinds_are_rejected() {
         &EncodeOptions {
             block_size: Some((4, 4)),
             channels: ALL_CODED,
-            filter: FilterChoice::On,
+            filter: FilterChoice::Row,
             coder: CoderChoice::Fixed,
         },
     )
@@ -352,7 +357,7 @@ fn truncated_context_streams_are_rejected() {
         &EncodeOptions {
             block_size: Some((4, 4)),
             channels: ALL_CODED,
-            filter: FilterChoice::On,
+            filter: FilterChoice::Row,
             coder: CoderChoice::Context,
         },
     )

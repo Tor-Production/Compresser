@@ -344,6 +344,145 @@ fn throughput_table(corpus: &Corpus, timed: &[(Coder, Variant)]) {
     println!();
 }
 
+/// The same question asked of the format itself: what does mode 2 cost the shipped decoder?
+///
+/// The prototypes above answer it for prototypes, and `cargo bench` answers it for two synthetic
+/// 512x512 images where prediction is a large share of a fast decode. Neither is the photograph
+/// corpus going through `brp-core`, which is what a caller would actually run.
+fn shipped_throughput_table(corpus: &Corpus) {
+    let mut configs: Vec<(String, brp_core::EncodeOptions)> = [
+        (RICE_BLOCK, brp_core::CoderChoice::Auto),
+        (CONTEXT_BLOCK, brp_core::CoderChoice::Context),
+    ]
+    .into_iter()
+    .flat_map(|(block, coder)| {
+        [
+            (brp_core::FilterChoice::Row, "pred"),
+            (brp_core::FilterChoice::Block, "predblk"),
+        ]
+        .into_iter()
+        .map(move |(filter, name)| {
+            let c = match coder {
+                brp_core::CoderChoice::Context => "ctxrice",
+                _ => "bestcoder",
+            };
+            (
+                format!("brp[{block}x{block},{name},{c}]"),
+                brp_core::EncodeOptions {
+                    block_size: Some((block, block)),
+                    filter,
+                    coder,
+                    ..Default::default()
+                },
+            )
+        })
+    })
+    .collect();
+
+    // What README.md quotes: the documented block size at default settings, and the same with the
+    // context coder asked for by name. Both leave the filter to `Auto`, which is the point.
+    for (block, coder, label) in [
+        (8, brp_core::CoderChoice::Auto, "brp[8x8,auto,bestcoder]"),
+        (
+            CONTEXT_BLOCK,
+            brp_core::CoderChoice::Context,
+            "brp[32x32,auto,ctxrice]",
+        ),
+    ] {
+        configs.push((
+            label.to_string(),
+            brp_core::EncodeOptions {
+                block_size: Some((block, block)),
+                filter: brp_core::FilterChoice::Auto,
+                coder,
+                ..Default::default()
+            },
+        ));
+    }
+
+    let streams: Vec<Vec<Vec<u8>>> = configs
+        .iter()
+        .map(|(_, opts)| {
+            corpus
+                .images
+                .iter()
+                .map(|img| brp_core::encode(img, opts).unwrap())
+                .collect()
+        })
+        .collect();
+
+    let mut encode = vec![Vec::new(); configs.len()];
+    let mut decode = vec![Vec::new(); configs.len()];
+    for _ in 0..ROUNDS {
+        for (i, (_, opts)) in configs.iter().enumerate() {
+            encode[i].push(rate(corpus.raw, || {
+                for img in &corpus.images {
+                    std::hint::black_box(brp_core::encode(img, opts).unwrap());
+                }
+            }));
+            decode[i].push(rate(corpus.raw, || {
+                for b in &streams[i] {
+                    std::hint::black_box(brp_core::decode(b).unwrap());
+                }
+            }));
+        }
+    }
+
+    // PNG's approach, timed in the same rounds, because a ratio quoted against it has to be.
+    let deflate = Filtered {
+        entropy: Entropy::Deflate,
+    };
+    let deflate_streams: Vec<Vec<u8>> = corpus
+        .images
+        .iter()
+        .map(|img| deflate.encode(img).unwrap())
+        .collect();
+    let mut deflate_encode = Vec::new();
+    let mut deflate_decode = Vec::new();
+    for _ in 0..ROUNDS {
+        deflate_encode.push(rate(corpus.raw, || {
+            for img in &corpus.images {
+                std::hint::black_box(deflate.encode(img).unwrap());
+            }
+        }));
+        deflate_decode.push(rate(corpus.raw, || {
+            for b in &deflate_streams {
+                std::hint::black_box(deflate.decode(b).unwrap());
+            }
+        }));
+    }
+
+    println!("  {}, the format itself, MiB/s over raw samples", corpus.name);
+    println!(
+        "  {:<42}  {:>12}  {:>12}  {:>8}",
+        "configuration", "encode", "decode", "size"
+    );
+    println!("  {:-<1$}", "", 82);
+    for (i, (label, _)) in configs.iter().enumerate() {
+        let (e, es) = summarise(&encode[i]);
+        let (d, ds) = summarise(&decode[i]);
+        let bytes: usize = streams[i].iter().map(|b| b.len()).sum();
+        println!(
+            "  {:<42}  {:>12}  {:>12}  {:>7.2}%",
+            label,
+            format!("{e:.0} +-{es:.0}%"),
+            format!("{d:.0} +-{ds:.0}%"),
+            percent(bytes, corpus.raw)
+        );
+    }
+    let (e, es) = summarise(&deflate_encode);
+    let (d, ds) = summarise(&deflate_decode);
+    let bytes: usize = deflate_streams.iter().map(|b| b.len()).sum();
+    println!(
+        "  {:<42}  {:>12}  {:>12}  {:>7.2}%",
+        "filter+deflate",
+        format!("{e:.0} +-{es:.0}%"),
+        format!("{d:.0} +-{ds:.0}%"),
+        percent(bytes, corpus.raw)
+    );
+    println!();
+}
+
 // ---------------------------------------------------------------------------------------------
 
 fn main() -> Result<()> {
@@ -410,6 +549,11 @@ fn main() -> Result<()> {
     rule(&corpora);
     header(&corpora, "pipeline");
     for (label, opts) in [
+        (
+            // The configuration every table in EXPERIMENTS.md quotes.
+            "brp[8x8,auto,bestcoder]".to_string(),
+            baseline_options(8, brp_core::CoderChoice::Auto),
+        ),
         (
             format!("brp[{RICE_BLOCK}x{RICE_BLOCK},auto,bestcoder]"),
             baseline_options(RICE_BLOCK, brp_core::CoderChoice::Auto),
@@ -514,6 +658,7 @@ fn main() -> Result<()> {
             .collect();
         for c in &corpora {
             throughput_table(c, &timed);
+            shipped_throughput_table(c);
         }
     }
 

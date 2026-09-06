@@ -22,22 +22,24 @@ one byte for its value replaces the whole channel.
 
 ## Status
 
-Format version 5. Four stages, each admitted only after measurement said so.
+Format version 6. Four stages, each admitted only after measurement said so.
 
 **Stage 1** removes whole-image redundancy: a channel whose samples are all identical becomes one
 header byte, and a channel identical to an earlier one becomes a reference. A solid colour is a
 30-byte header at any resolution; grayscale stored as RGB costs one channel instead of three.
 
-**Stage 1.5** predicts each sample from its neighbours, one of PNG's five predictors per row, and
-stores the *zigzagged* difference.
+**Stage 1.5** predicts each sample from its neighbours with one of PNG's five predictors — chosen
+per row, or per 8x8 block where that measures smaller — and stores the *zigzagged* difference.
 
 **Stage 2** splits the image into blocks and writes each block's residuals with one of three
 coders: at a single fixed width, with **Golomb-Rice** at a parameter stored per block, or with Rice
 at a parameter *derived* per sample from a context of local gradients — which stores no parameter
 at all and adapts inside a block rather than across blocks.
 
-Prediction and coder both default to `Auto`: the encoder measures rather than guesses. `Auto`
-weighs the first two coders only. The third is smaller and about half the decode speed, so it is a
+Prediction and coder both default to `Auto`: the encoder measures rather than guesses. That is how
+the per-block predictor choice is decided too — it is 1.5 points smaller on photographs and larger
+on flat synthetic images, so the encoder tries it rather than assuming. `Auto` weighs the first two
+coders only. The third is smaller and about half the decode speed, so it is a
 deliberate choice — `--coder context` — rather than something that happens to you.
 
 ### What the measurements say
@@ -46,22 +48,28 @@ On eight Kodak photographs (9.0 MiB raw), 8x8 blocks:
 
 | Pipeline | Size | Encode | Decode |
 |---|---:|---:|---:|
-| `filter+deflate` — a tuned PNG-style pipeline | **57.5%** | 9 MiB/s | 96 MiB/s |
-| **BRP `--coder context` at 32x32** | **58.3%** | 19 MiB/s | 36 MiB/s |
-| **BRP v5, default settings** | 60.7% | 24 MiB/s | 80 MiB/s |
-| BRP defaults with Deflate on top | 59.7% | 17 MiB/s | 66 MiB/s |
-| `raw+deflate` | 64.4% | 27 MiB/s | 174 MiB/s |
-| BRP v3 configuration (prediction, fixed width) | 72.3% | 50 MiB/s | 161 MiB/s |
+| **BRP `--coder context` at 32x32** | **57.0%** | 11 MiB/s | 36 MiB/s |
+| `filter+deflate` — a tuned PNG-style pipeline | 57.5% | 9 MiB/s | 109 MiB/s |
+| **BRP v6, default settings** | 59.2% | 14 MiB/s | 69 MiB/s |
+| BRP v3 configuration (per-row prediction, fixed width) | 72.3% | 50 MiB/s | 161 MiB/s |
 | BRP v2 configuration (no prediction) | 75.5% | 188 MiB/s | 422 MiB/s |
 
+The first three rows are one run, which is the only way throughput columns compare. The last two
+are older runs kept for the shape of the trade — version 6 does not change what those pinned
+configurations produce, and their sizes still stand.
+
 Against real encoders on the same photographs: the `image` crate's PNG output is 65.1%, WebP
-lossless 48.6%. So the default settings beat that PNG encoder and trail a well-tuned
-filter-plus-Deflate pipeline by 3.2 points; the context coder closes that to 0.8, and both trail
-WebP.
+lossless 48.6%. The default settings beat that PNG encoder and trail a well-tuned
+filter-plus-Deflate pipeline by 1.7 points; the context coder is **0.5 points ahead** of it. Both
+trail WebP.
+
+Encoding is where version 6 charges for that. `Auto` now tries three prediction layouts instead of
+two, which is most of the drop from 24 MiB/s to 14 at default settings; pinning `--filter block`
+or `--filter row` gets it back.
 
 Those are 768x512 crops. On one 45-megapixel photograph — the size at which nothing fits in cache,
 and the size real photographs actually are — the order changes: PNG 36.6%, WebP lossless 42.2%,
-BRP 32.1% at default settings and **31.6%** with the context coder.
+BRP **31.9%** at 16x16 and **31.3%** with the context coder.
 
 Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
 
@@ -80,6 +88,10 @@ Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md
   to cost more encode throughput than Rice did. Fixing what the measurements actually pointed at
   bought 1.6-1.9x on encode with no change to a single output bit. Decode then became the weak
   side, and a refilling bit reader bought 1.2-1.9x there — also without changing an output bit.
+- **The unit of choice beat the better predictor.** Roadmap item 1 was going to adopt LOCO-I's or
+  CALIC's gradient predictor; both are worth about half a point. Choosing among PNG's *existing*
+  five per 8x8 block instead of per row is worth three times that, at no measurable decode cost on
+  photographs, and it is what version 6 adopted.
 - **Deriving the Rice parameter from context is worth 1.6 points and half the decode speed.** It is
   in the format as an opt-in coder for exactly that reason. Decoding it with the bit reader removed
   from the loop entirely still runs at barely half the default's rate, so the cost is the model's
@@ -96,7 +108,7 @@ cargo run -p brp-cli --release -- encode input.png output.brp --block-size 16x16
 ```
 
 ```bash
-cargo run -p brp-cli --release -- encode input.png output.brp --filter off --coder fixed
+cargo run -p brp-cli --release -- encode input.png output.brp --filter block --coder fixed
 ```
 
 ```bash

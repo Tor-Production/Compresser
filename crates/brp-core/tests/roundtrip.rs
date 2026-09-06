@@ -38,7 +38,7 @@ const CHANNEL_OPTIONS: &[ChannelOptions] = &[
 ];
 
 /// Every prediction choice, so a bug in one path cannot hide behind another.
-const FILTERS: &[FilterChoice] = &[FilterChoice::Off, FilterChoice::On, FilterChoice::Auto];
+const FILTERS: &[FilterChoice] = &[FilterChoice::Off, FilterChoice::Row, FilterChoice::Auto];
 
 /// Every block coder, likewise.
 const CODERS: &[CoderChoice] = &[

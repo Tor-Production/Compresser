@@ -13,9 +13,11 @@ identical, so the value moves to the header and the channel leaves the bitstream
 earlier channel (identical samples, so a grayscale image stored as RGB costs one channel), or
 *coded*.
 
-**Stage 1.5, spatial prediction** (optional, `filter_mode` in the header). Each row picks one of
-PNG's five predictors and every sample becomes the **zigzagged** difference from its prediction.
-The zigzag is not cosmetic — without it this stage makes files *larger than raw*.
+**Stage 1.5, spatial prediction** (optional, `filter_mode` in the header). One of PNG's five
+predictors is chosen per row (mode 1) or per 8x8 block (mode 2), and every sample becomes the
+**zigzagged** difference from its prediction. The zigzag is not cosmetic — without it this stage
+makes files *larger than raw*. The 8 in mode 2 is fixed by the format and independent of stage 2's
+block size, which defaults to the whole image.
 
 **Stage 2, block packing.** Split the image into blocks; per block, per coded channel, store the
 minimum as a *base* and subtract it. The residuals are then written by one of three coders, named
@@ -85,11 +87,16 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Format version 5: whole-image channel reduction, optional spatial prediction, block packing with a
-choice of three coders — fixed width, Golomb-Rice with a stored parameter, and Golomb-Rice with the
-parameter derived from a context of local gradients. Block size defaults to the whole image; it is
-already a parameter, so a block-size sweep works today. Prediction and coder both default to `Auto`,
-which measures rather than guesses.
+Format version 6: whole-image channel reduction, optional spatial prediction with the predictor
+chosen per row or per 8x8 block, block packing with a choice of three coders — fixed width,
+Golomb-Rice with a stored parameter, and Golomb-Rice with the parameter derived from a context of
+local gradients. Block size defaults to the whole image; it is already a parameter, so a block-size
+sweep works today. Prediction and coder both default to `Auto`, which measures rather than guesses.
+
+**`Auto` prediction now costs up to three encodings.** It tries none and per-row as before, and
+reaches for the per-block layout only when per-row already beat none — an image that does not want
+to be predicted does not want to pay for finer prediction either. Pin it with `--filter row`,
+`--filter block`, or the matching `FilterChoice`.
 
 **`Auto` weighs the first two coders only.** The context coder is 1.6 points smaller on photographs
 and about half the decode speed, so it is opt-in — `--coder context`, or `CoderChoice::Context`.

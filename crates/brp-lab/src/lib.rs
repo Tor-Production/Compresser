@@ -106,7 +106,8 @@ impl Codec for Brp {
         };
         let f = match self.filter {
             brp_core::FilterChoice::Off => "",
-            brp_core::FilterChoice::On => ",pred",
+            brp_core::FilterChoice::Row => ",pred",
+            brp_core::FilterChoice::Block => ",predblk",
             brp_core::FilterChoice::Auto => ",auto",
         };
         let c = match self.coder {

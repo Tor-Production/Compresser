@@ -54,7 +54,7 @@ fn rgba_with_constant_channels() {
     let expected: Vec<u8> = vec![
         // -- header, 29 bytes --
         b'B', b'R', b'P', 0x1A,
-        5,                      // version
+        6,                      // version
         0,                      // flags
         2, 0, 0, 0,             // width
         2, 0, 0, 0,             // height
@@ -89,7 +89,7 @@ fn constant_grayscale_is_header_only() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -133,7 +133,7 @@ fn grayscale_carried_in_rgb() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -175,7 +175,7 @@ fn grayscale_carried_in_rgb() {
 ///   00000100 0101              base 4, width code 5
 ///   10000 00000 00100 00000    residuals 16, 0, 4, 0
 ///
-/// Encoded with `FilterChoice::On`, not the default: on a 2x2 image the unpredicted file is
+/// Encoded with `FilterChoice::Row`, not the default: on a 2x2 image the unpredicted file is
 /// smaller, because two rows of filter codes cost more than they save.
 #[test]
 fn prediction_and_zigzag() {
@@ -184,7 +184,7 @@ fn prediction_and_zigzag() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -200,7 +200,7 @@ fn prediction_and_zigzag() {
     ];
 
     let opts = EncodeOptions {
-        filter: FilterChoice::On,
+        filter: FilterChoice::Row,
         ..plain(None)
     };
     let actual = encode(&src, &opts).unwrap();
@@ -239,7 +239,7 @@ fn rice_coded_block() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -331,7 +331,7 @@ fn context_coded_block() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -396,7 +396,7 @@ fn context_coded_escape_and_sign_folding() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        5,
+        6,
         0,
         4, 0, 0, 0,             // width
         1, 0, 0, 0,             // height
@@ -436,6 +436,73 @@ expected: {expected:02X?}"
     );
 }
 
+/// Filter mode 2: the predictor chosen per 8x8 block instead of per row (`FORMAT.md` 5.2).
+///
+/// 9x1 grayscale, so the row spans two prediction blocks and each one gets its own kind — the
+/// thing mode 1 cannot express. Samples: 10, 12, 14, 16, 18, 20, 22, 200, 3.
+///
+/// Block 0 covers x = 0..8. Costed over it, Sub spends 10 + 2*6 + 78 = 100 and every other kind
+/// more (None 168, Average 134, Paeth ties Sub at 100 but loses the tie to the lower kind), so
+/// kind 1. Block 1 is the single sample x = 8, where the left neighbour is 200 and the sample is
+/// 3: None spends 3, Sub 59, so kind 0.
+///
+/// Residuals, zigzagged: 20, 4, 4, 4, 4, 4, 4, 155, 6. The one block then packs them: min 4,
+/// max 155, span 151, width code 8.
+///
+/// Body bits, 90 of them plus 6 of padding:
+///   001 000                    filter kinds: Sub for block 0, None for block 1
+///   00000100 1000              base 4, width code 8
+///   00010000                   residual 16
+///   00000000 x6                residuals 0
+///   10010111 00000010          residuals 151, 2
+#[test]
+fn per_block_prediction() {
+    let src = RawImage::new(9, 1, 1, vec![10, 12, 14, 16, 18, 20, 22, 200, 3]).unwrap();
+
+    #[rustfmt::skip]
+    let expected: Vec<u8> = vec![
+        // -- header, 27 bytes --
+        b'B', b'R', b'P', 0x1A,
+        6,                      // version
+        0,                      // flags
+        9, 0, 0, 0,             // width
+        1, 0, 0, 0,             // height
+        1,                      // channels
+        8,                      // bit depth
+        9, 0, 0, 0,             // block width
+        1, 0, 0, 0,             // block height
+        2,                      // filter mode: adaptive per 8x8 block
+        0,                      // block coder: fixed width
+        0x00,                   // channel modes: coded
+        // -- body, 12 bytes --
+        0x20, 0x12, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x25, 0xC0, 0x80,
+    ];
+
+    let opts = EncodeOptions {
+        filter: FilterChoice::Block,
+        ..plain(None)
+    };
+    let actual = encode(&src, &opts).unwrap();
+    assert_eq!(
+        actual, expected,
+        "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
+    );
+    assert_eq!(decode(&expected).unwrap(), src);
+
+    // The kinds differ per block, which is the whole point: mode 1 has one code for this row and
+    // must spend it on a single predictor for both halves.
+    let by_row = encode(
+        &src,
+        &EncodeOptions {
+            filter: FilterChoice::Row,
+            ..plain(None)
+        },
+    )
+    .unwrap();
+    assert_eq!(decode(&by_row).unwrap(), src);
+    assert_eq!(by_row[24], 1, "the control must be the per-row mode");
+}
+
 /// Locks the header field offsets in `FORMAT.md` section 3 against accidental reordering.
 #[test]
 fn header_field_offsets() {
@@ -445,7 +512,7 @@ fn header_field_offsets() {
     let bytes = encode(&src, &plain(Some((2, 4)))).unwrap();
 
     assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-    assert_eq!(bytes[4], 5);
+    assert_eq!(bytes[4], 6);
     assert_eq!(bytes[5], 0);
     assert_eq!(&bytes[6..10], &5u32.to_le_bytes());
     assert_eq!(&bytes[10..14], &1u32.to_le_bytes());

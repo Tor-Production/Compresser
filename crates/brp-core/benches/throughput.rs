@@ -72,11 +72,12 @@ fn opts_for(block: Option<u32>, filter: FilterChoice, coder: CoderChoice) -> Enc
 ///
 /// The first three rows are the control for a change to the context model: nothing in them runs
 /// it, so if they move, the machine moved.
-const CONFIGS: [(&str, FilterChoice, CoderChoice); 4] = [
+const CONFIGS: [(&str, FilterChoice, CoderChoice); 5] = [
     ("", FilterChoice::Off, CoderChoice::Fixed),
-    ("+pred", FilterChoice::On, CoderChoice::Fixed),
-    ("+pred+rice", FilterChoice::On, CoderChoice::Rice),
-    ("+pred+ctxrice", FilterChoice::On, CoderChoice::Context),
+    ("+pred", FilterChoice::Row, CoderChoice::Fixed),
+    ("+pred+rice", FilterChoice::Row, CoderChoice::Rice),
+    ("+predblk+rice", FilterChoice::Block, CoderChoice::Rice),
+    ("+pred+ctxrice", FilterChoice::Row, CoderChoice::Context),
 ];
 
 fn bench_encode(c: &mut Criterion) {

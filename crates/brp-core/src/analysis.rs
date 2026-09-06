@@ -5,11 +5,11 @@ use crate::block::{BlockGrid, BlockRect};
 use crate::context::{ContextModel, Plane};
 use crate::error::BrpError;
 use crate::header::{
-    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS,
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS,
     ZERO_BLOCK_BITS,
 };
 use crate::image::{required_len, MAX_CHANNELS};
-use crate::predict::{FILTER_KINDS, FILTER_KIND_BITS};
+use crate::predict::{FilterLayout, FILTER_KINDS, FILTER_KIND_BITS};
 use crate::rice;
 use crate::Result;
 
@@ -85,17 +85,18 @@ pub fn analyze(bytes: &[u8]) -> Result<Analysis> {
         let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
         let mut reader = BitReader::new(&bytes[header_len..]);
 
-        // The per-row predictors precede the blocks; skipping them would misalign everything.
-        if header.filter_mode == FILTER_MODE_ADAPTIVE {
-            filter_kinds.reserve(header.height as usize);
-            for _ in 0..header.height {
+        // The predictor codes precede the blocks; skipping them would misalign everything.
+        if let Some(layout) = FilterLayout::from_mode(header.filter_mode) {
+            let units = layout.units(header.width, header.height);
+            filter_kinds.reserve(units);
+            for _ in 0..units {
                 let kind = reader.read(FILTER_KIND_BITS)? as u8;
                 if kind >= FILTER_KINDS {
                     return Err(BrpError::InvalidFilterKind(kind));
                 }
                 filter_kinds.push(kind);
             }
-            filter_bits = u64::from(header.height) * u64::from(FILTER_KIND_BITS);
+            filter_bits = units as u64 * u64::from(FILTER_KIND_BITS);
         }
 
         if header.block_coder == BLOCK_CODER_CONTEXT {
@@ -291,7 +292,7 @@ mod tests {
             &src,
             &EncodeOptions {
                 block_size: Some((4, 4)),
-                filter: FilterChoice::On,
+                filter: FilterChoice::Row,
                 coder: crate::encode::CoderChoice::Fixed,
                 ..Default::default()
             },

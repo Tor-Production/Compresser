@@ -80,9 +80,12 @@ impl From<CoderArg> for CoderChoice {
 enum FilterArg {
     /// Never predict. Fastest to encode.
     Off,
-    /// Always predict.
-    On,
-    /// Encode both ways and keep the smaller file.
+    /// Predict, choosing the predictor once per row.
+    Row,
+    /// Predict, choosing the predictor once per 8x8 block. Smaller on photographs, decodes at the
+    /// same rate, and costs three bits per block — see ADR 0010.
+    Block,
+    /// Encode each way that could win and keep the smallest file.
     Auto,
 }
 
@@ -90,7 +93,8 @@ impl From<FilterArg> for FilterChoice {
     fn from(a: FilterArg) -> Self {
         match a {
             FilterArg::Off => FilterChoice::Off,
-            FilterArg::On => FilterChoice::On,
+            FilterArg::Row => FilterChoice::Row,
+            FilterArg::Block => FilterChoice::Block,
             FilterArg::Auto => FilterChoice::Auto,
         }
     }
@@ -227,10 +231,10 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     println!("  block size     {}x{}", h.block_w, h.block_h);
     println!(
         "  prediction     {}",
-        if h.filter_mode == brp_core::FILTER_MODE_ADAPTIVE {
-            "adaptive per-row, zigzagged residuals"
-        } else {
-            "off"
+        match h.filter_mode {
+            brp_core::FILTER_MODE_ADAPTIVE => "adaptive per row, zigzagged residuals",
+            brp_core::FILTER_MODE_BLOCK => "adaptive per 8x8 block, zigzagged residuals",
+            _ => "off",
         }
     );
     println!(
@@ -270,7 +274,7 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     println!("\nwhere the bits went");
     print_bits("file header", header_bits, total_bits);
     if a.filter_bits > 0 {
-        print_bits("row filters", a.filter_bits, total_bits);
+        print_bits("filter codes", a.filter_bits, total_bits);
     }
     print_bits("block headers", a.block_header_bits, total_bits);
     print_bits("payload", a.payload_bits, total_bits);
@@ -285,7 +289,12 @@ fn print_info(a: &Analysis, list_blocks: usize) {
     }
 
     if !a.filter_kinds.is_empty() {
-        println!("\npredictors chosen (rows)");
+        let unit = if h.filter_mode == brp_core::FILTER_MODE_BLOCK {
+            "8x8 blocks"
+        } else {
+            "rows"
+        };
+        println!("\npredictors chosen ({unit})");
         let names = ["none", "sub", "up", "average", "paeth"];
         for (kind, name) in names.iter().enumerate() {
             let n = a

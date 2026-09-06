@@ -513,7 +513,17 @@ pub fn stats(img: &RawImage, block: u32, predict: bool) -> ResidualStats {
     let coded = plan.coded_indices();
 
     let residuals = if predict && !coded.is_empty() {
-        Some(apply_prediction(img.data(), img.width(), img.height(), stride, &coded).1)
+        Some(
+            apply_prediction(
+                brp_core::FilterLayout::Row,
+                img.data(),
+                img.width(),
+                img.height(),
+                stride,
+                &coded,
+            )
+            .1,
+        )
     } else {
         None
     };

@@ -22,10 +22,10 @@ classified:
   cost the same as one stored as gray.
 - **coded** — everything else. These are the only channels that reach stage 2.
 
-**Stage 1.5, spatial prediction.** Optional, and recorded in the header. Each row picks one of
-five predictors — the same five PNG defines — shared by every coded channel, and each sample is
-replaced by the *zigzagged* difference from its prediction. Stage 2 then packs those residuals
-instead of the samples.
+**Stage 1.5, spatial prediction.** Optional, and recorded in the header. One of five predictors —
+the same five PNG defines — is chosen per row or per 8x8 block, shared by every coded channel, and
+each sample is replaced by the *zigzagged* difference from its prediction. Stage 2 then packs those
+residuals instead of the samples.
 
 **Stage 2, block packing.** The image is divided into a grid of blocks, and each coded channel of
 each block is written by one of three coders, named once for the whole file in `block_coder`:
@@ -63,15 +63,15 @@ Byte-aligned, at offset 0.
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
 | 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
-| 4      | `version`       | u8   | `5`                                                       |
+| 4      | `version`       | u8   | `6`                                                       |
 | 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
 | 10     | `height`        | u32  | pixels, MUST be > 0                                       |
 | 14     | `channels`      | u8   | 1 = Gray, 2 = Gray+Alpha, 3 = RGB, 4 = RGBA               |
-| 15     | `bit_depth`     | u8   | MUST be 8 in version 5                                    |
+| 15     | `bit_depth`     | u8   | MUST be 8 in version 6                                    |
 | 16     | `block_w`       | u32  | pixels, MUST be > 0                                       |
 | 20     | `block_h`       | u32  | pixels, MUST be > 0                                       |
-| 24     | `filter_mode`   | u8   | 0 = no prediction, 1 = adaptive per-row — see section 5   |
+| 24     | `filter_mode`   | u8   | 0 = none, 1 = per row, 2 = per 8x8 block — see section 5   |
 | 25     | `block_coder`   | u8   | 0 = fixed, 1 = Rice, 2 = context-modelled Rice — section 6 |
 | 26     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
 | 27     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
@@ -85,7 +85,8 @@ Header length is therefore `27 + (1 if any alias) + (number of constant channels
 32 bytes. The body bitstream starts at the next byte.
 
 `filter_mode` MUST be 0 when no channel is `CODED`: with nothing to predict, prediction has no
-canonical encoding, and allowing both values would make two different files mean the same image.
+canonical encoding, and allowing the other values would make three different files mean the same
+image.
 
 ### 3.1 `channel_modes`
 
@@ -132,8 +133,9 @@ padded and carry no marker — the geometry is fully determined by the header.
 
 ## 5. Prediction
 
-When `filter_mode` is 1, the body opens with `height` fields of 3 bits each, one per image row in
-top-to-bottom order, naming that row's predictor:
+When `filter_mode` is 1 or 2, the body opens with a sequence of 3-bit fields naming predictors.
+How many there are, and which samples each governs, is what the two modes differ in; everything
+else in this section applies to both.
 
 | Value | Predictor | Prediction |
 |------:|-----------|------------|
@@ -145,7 +147,35 @@ top-to-bottom order, naming that row's predictor:
 | 5..7 | — | reserved, MUST be rejected |
 
 Neighbours outside the image read as 0, and every neighbour is the sample of the *same channel* at
-that position. The predictor applies to every coded channel of the row alike.
+that position. A predictor applies to every coded channel of the samples it governs alike.
+
+### 5.1 Mode 1 — one predictor per row
+
+`height` fields, one per image row in top-to-bottom order. Field `y` governs every sample of row
+`y`.
+
+### 5.2 Mode 2 — one predictor per 8x8 block
+
+The image is covered by a grid of 8x8 squares, independent of the block grid of section 4:
+
+```
+filter_across = ceil(width / 8)
+filter_down   = ceil(height / 8)
+```
+
+`filter_across * filter_down` fields follow, in raster order of that grid — left to right, then
+top to bottom. Field `by * filter_across + bx` governs the samples with
+`bx * 8 <= x < min(bx * 8 + 8, width)` and `by * 8 <= y < min(by * 8 + 8, height)`.
+
+Squares at the right and bottom edges are clipped to the image, exactly as section 4's blocks are,
+and carry no marker.
+
+**The 8 is fixed by this specification, not signalled.** A grid this size measured 56.99% of raw
+on the photograph corpus against 57.27% at 16x16 and 56.94% at 4x4, so the curve is flat below it,
+and 4x4 costs 0.26 points on the synthetic corpus where four times as many fields land on files
+that are already small. ADR 0010 has the measurements.
+
+### 5.3 Residuals
 
 Each sample is then replaced by
 
@@ -159,9 +189,10 @@ Without it a residual of -1 is stored as 255, so a block holding residuals of -1
 0..255 and needs the full eight bits even though every value in it is tiny. Measured, the naive
 composition produces files *larger than the raw samples*; see `docs/EXPERIMENTS.md`.
 
-An encoder chooses each row's predictor freely — the choice affects size, never correctness. The
-reference encoder minimises the sum of absolute residuals over the row, which is PNG's heuristic
-and measured better than minimising the largest residual.
+An encoder chooses each field's predictor freely — the choice affects size, never correctness —
+and chooses between modes 1 and 2 freely too. The reference encoder minimises the sum of absolute
+residuals over the samples a field governs, which is PNG's heuristic and measured better than
+minimising the largest residual.
 
 Channels that stage 1 elided are not predicted; they do not appear in the bitstream at all.
 
@@ -280,8 +311,8 @@ decoded yet, and making the context depend on block geometry to work around that
 the fourth gradient is worth.
 
 The values read are residuals, not samples — the same bytes the decoder writes into its buffer in
-step 2 of section 7. When `filter_mode` is 1 they are zigzagged prediction residuals; when it is 0
-they are samples. The context is defined on whatever stage 2 is coding, so the reconstruction
+step 2 of section 7. When `filter_mode` is 1 or 2 they are zigzagged prediction residuals; when it
+is 0 they are samples. The context is defined on whatever stage 2 is coding, so the reconstruction
 order of section 7 is unchanged by this coder.
 
 #### 6.3.2 Quantised gradients
@@ -361,7 +392,8 @@ final values until step 3.
 For one block of `n = bw * bh` pixels over `k = coded_channels.len()` channels:
 
 ```
-prediction bits = height * 3          (once per file, when filter_mode is 1)
+prediction bits = height * 3                       (filter_mode 1)
+                  ceil(w/8) * ceil(h/8) * 3        (filter_mode 2)
 header bits     = k * (bit_depth + 4)              under block_coder 0 and 1
                   k                                under block_coder 2
 payload bits    = n * sum(width_code[c])           under fixed width
@@ -384,13 +416,13 @@ overhead — and instead costs 28 bytes in total.
 A decoder MUST reject, with an error and never a panic:
 
 - `magic` != `42 52 50 1A`
-- `version` != 5
+- `version` != 6
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
 - any of `width`, `height`, `block_w`, `block_h` == 0
 - reserved flag bits non-zero
-- `filter_mode` above 1
-- `filter_mode` of 1 with no `CODED` channel
+- `filter_mode` above 2
+- `filter_mode` of 1 or 2 with no `CODED` channel
 - a filter kind above 4
 - `block_coder` above 2
 - a width code above `bit_depth`, under `block_coder` 0
@@ -437,3 +469,4 @@ whatever bits the file contains, so neither can index out of range.
 | 3 | Optional spatial prediction with zigzagged residuals, selected per row from PNG's five predictors, recorded in a new `filter_mode` header byte. |
 | 4 | Golomb-Rice as an alternative block coder, selected per file by a new `block_coder` header byte. Gives up the ability to compute a block's payload size from its headers. |
 | 5 | A third block coder: the same Rice codes with the parameter derived from a context of quantised local gradients rather than stored per block. Drops the base and the parameter field, and adds a one-bit escape. Not the default — it trades decode speed for ratio. ADR 0009. |
+| 6 | `filter_mode` 2: the same five predictors chosen per 8x8 block instead of per row. Worth 1.3 to 1.5 points on photographs at the same decode rate, and `Auto` reaches for it only where prediction is already winning. ADR 0010. |

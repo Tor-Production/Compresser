@@ -632,15 +632,30 @@ of course choosing per block costs something.
 
 #### What this means for the format
 
-Adopting the per-block choice is a version bump, and it needs one decision that this finding does
-not make: prediction currently signals one kind per *row*, and a per-block choice needs a grid.
-Tying that grid to stage 2's block size would be the obvious move and is wrong — the shipped
-default block size is the whole image, which would turn a per-row choice into a per-image one — so
-the prediction grid has to stand on its own. At 8x8 it needs no header field at all, only a filter
-mode that says the codes are laid out per block.
+**Adopted in version 6, ADR 0010** — the per-block choice, not the predictors. The prediction grid
+is its own 8x8 grid rather than stage 2's block size, because the shipped default block size is the
+whole image and borrowing it would turn a per-row choice into a per-image one.
 
-MED and GAP are a separate decision, and a harder one: they cost decode speed in the same place
-the context coder does, and speed is this codec's argument.
+Measured through the format afterwards, on the photographs, in one run:
+
+| Configuration | Encode | Decode | Size |
+|---|---:|---:|---:|
+| `brp[16x16,pred,bestcoder]` — version 5's layout | 35 MiB/s | 72 MiB/s | 59.88% |
+| `brp[16x16,predblk,bestcoder]` | 34 | 72 | **58.38%** |
+| `brp[32x32,pred,ctxrice]` | 30 | 36 | 58.28% |
+| `brp[32x32,predblk,ctxrice]` | 29 | 37 | **56.99%** |
+
+The shipped coder reproduces the prototype to the decimal, as versions 4 and 5 did.
+
+Where the cost does show up is the content `Auto` will not choose it for. In `cargo bench` on two
+synthetic 512x512 images, decode goes from 70 to 62 MiB/s on noise and 111 to 84 on a narrow band —
+images where the codes are cheap, so unprediction is most of the decode, and a run of 8 samples
+carries more loop overhead per sample than a run of 512. Mode 2 is also *larger* on those, so the
+encoder does not pick it; the cost lands only on a caller who pins `--filter block` against the
+measurements.
+
+MED and GAP stay measured and unadopted. They cost decode speed in the same place the context coder
+does, and speed is this codec's argument.
 
 ## Adopted into the format
 
@@ -668,6 +683,22 @@ the current eight photographs:
 
 The context coder reproduces its lab prototype to the decimal on all three, so version 5 cost
 nothing in the move either.
+
+Version 6 (ADR 0010) changes what the default produces, because `Auto` now reaches for a per-block
+predictor choice wherever prediction is already winning. At 8x8 blocks, and at each coder's own
+best block size:
+
+| | v5 | v6 |
+|---|---:|---:|
+| `brp[8x8,auto,bestcoder]`, photographs | 60.69% | **59.22%** |
+| `brp[16x16,auto,bestcoder]`, photographs | 59.88% | **58.38%** |
+| `brp[32x32,auto,ctxrice]`, photographs | 58.28% | **56.99%** |
+| `brp[8x8,auto,bestcoder]`, synthetic | 26.66% | 26.52% |
+| `brp[16x16,auto,bestcoder]`, 130 MiB photograph | 32.14% | **31.89%** |
+| `brp[32x32,auto,ctxrice]`, 130 MiB photograph | 31.60% | **31.31%** |
+
+Nothing regressed, including the synthetic corpus, because the choice is made per image against a
+measured size rather than assumed.
 
 ## What this says to do next
 

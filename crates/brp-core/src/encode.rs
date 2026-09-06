@@ -6,22 +6,27 @@ use crate::channels::{self, ChannelOptions};
 use crate::context::{ContextModel, Plane};
 use crate::error::BrpError;
 use crate::header::{
-    Header, BIT_DEPTH, BLOCK_CODER_CONTEXT, BLOCK_CODER_FIXED, BLOCK_CODER_RICE,
-    FILTER_MODE_ADAPTIVE, FILTER_MODE_NONE, HEADER_BASE_SIZE, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
+    Header, BIT_DEPTH, BLOCK_CODER_CONTEXT, BLOCK_CODER_FIXED, BLOCK_CODER_RICE, FILTER_MODE_NONE,
+    HEADER_BASE_SIZE, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
 };
 use crate::image::{RawImage, MAX_CHANNELS};
-use crate::predict::{self, FILTER_KIND_BITS};
+use crate::predict::{self, FilterLayout, FILTER_KIND_BITS};
 use crate::rice;
 use crate::Result;
 
-/// Whether the encoder predicts samples from their neighbours before packing them.
+/// Whether the encoder predicts samples from their neighbours before packing them, and where the
+/// predictor may change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterChoice {
     /// Never predict. Fastest, and best on images the block packer already handles well.
     Off,
-    /// Always predict.
-    On,
-    /// Encode both ways and keep the smaller file. Roughly doubles encode time.
+    /// Predict, choosing the predictor once per row. What versions 3 to 5 always did.
+    Row,
+    /// Predict, choosing the predictor once per 8x8 block. Smaller on photographs by 1.3 to 1.5
+    /// points and decodes at the same rate; costs three bits per block, which is why it is not
+    /// simply better — see ADR 0010.
+    Block,
+    /// Encode each way that could win and keep the smallest file.
     #[default]
     Auto,
 }
@@ -163,26 +168,38 @@ fn cheaper_coder(
     }
 }
 
-/// Encodes an image into a BRP v5 bitstream.
+/// Encodes an image into a BRP v6 bitstream.
 pub fn encode(img: &RawImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
     match opts.filter {
-        FilterChoice::Off => encode_with_filter(img, opts, false),
-        FilterChoice::On => encode_with_filter(img, opts, true),
+        FilterChoice::Off => encode_with_filter(img, opts, None),
+        FilterChoice::Row => encode_with_filter(img, opts, Some(FilterLayout::Row)),
+        FilterChoice::Block => encode_with_filter(img, opts, Some(FilterLayout::Block)),
         FilterChoice::Auto => {
             // Prediction helps photographs and hurts some synthetic content, and which it is
             // cannot be told cheaply from the samples. Encoding is fast; try both.
-            let plain = encode_with_filter(img, opts, false)?;
-            let predicted = encode_with_filter(img, opts, true)?;
-            Ok(if predicted.len() < plain.len() {
-                predicted
+            let plain = encode_with_filter(img, opts, None)?;
+            let by_row = encode_with_filter(img, opts, Some(FilterLayout::Row))?;
+            if by_row.len() >= plain.len() {
+                // Prediction is not winning on this image, and a finer choice of predictor only
+                // pays more side information for it. Two encodes, exactly as before version 6.
+                return Ok(plain);
+            }
+
+            let by_block = encode_with_filter(img, opts, Some(FilterLayout::Block))?;
+            Ok(if by_block.len() < by_row.len() {
+                by_block
             } else {
-                plain
+                by_row
             })
         }
     }
 }
 
-fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Result<Vec<u8>> {
+fn encode_with_filter(
+    img: &RawImage,
+    opts: &EncodeOptions,
+    layout: Option<FilterLayout>,
+) -> Result<Vec<u8>> {
     let (block_w, block_h) = opts.block_size.unwrap_or((img.width(), img.height()));
     if block_w == 0 {
         return Err(BrpError::ZeroDimension { what: "block_w" });
@@ -199,14 +216,15 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
     let coded = plan.coded_indices();
 
     // With nothing left to code there is nothing to predict either.
-    let filter = filter && !coded.is_empty();
+    let layout = if coded.is_empty() { None } else { layout };
 
     // Stage 1.5: prediction, if enabled. The block packer then works on the residuals.
-    let (kinds, residuals) = if filter {
-        let (k, r) = predict::apply(source, img.width(), img.height(), stride, &coded);
-        (k, Some(r))
-    } else {
-        (Vec::new(), None)
+    let (kinds, residuals) = match layout {
+        Some(l) => {
+            let (k, r) = predict::apply(l, source, img.width(), img.height(), stride, &coded);
+            (k, Some(r))
+        }
+        None => (Vec::new(), None),
     };
     let data: &[u8] = residuals.as_deref().unwrap_or(source);
 
@@ -229,11 +247,7 @@ fn encode_with_filter(img: &RawImage, opts: &EncodeOptions, filter: bool) -> Res
         bit_depth: BIT_DEPTH,
         block_w,
         block_h,
-        filter_mode: if filter {
-            FILTER_MODE_ADAPTIVE
-        } else {
-            FILTER_MODE_NONE
-        },
+        filter_mode: layout.map_or(FILTER_MODE_NONE, FilterLayout::mode),
         block_coder,
         plan,
     };
@@ -483,13 +497,29 @@ mod tests {
             let on = encode(
                 &img,
                 &EncodeOptions {
-                    filter: FilterChoice::On,
+                    filter: FilterChoice::Row,
+                    ..base.clone()
+                },
+            )
+            .unwrap();
+            let per_block = encode(
+                &img,
+                &EncodeOptions {
+                    filter: FilterChoice::Block,
                     ..base.clone()
                 },
             )
             .unwrap();
             let auto = encode(&img, &base).unwrap();
-            assert_eq!(auto.len(), on.len().min(off.len()));
+
+            // Auto only reaches for the per-block choice where prediction is already winning,
+            // so that is the smallest it can be expected to find.
+            let best = if on.len() < off.len() {
+                on.len().min(per_block.len())
+            } else {
+                off.len()
+            };
+            assert_eq!(auto.len(), best);
         }
     }
 }

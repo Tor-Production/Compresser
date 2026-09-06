@@ -11,7 +11,7 @@ use crate::Result;
 /// Version-independent by design — the `version` byte is the single source of truth. See ADR 0004.
 pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 /// The only bit depth version 5 defines.
 pub const BIT_DEPTH: u8 = 8;
@@ -42,6 +42,9 @@ pub const BLOCK_CODER_CONTEXT: u8 = 2;
 pub const FILTER_MODE_NONE: u8 = 0;
 /// Adaptive per-row predictor with zigzagged residuals, as in `FORMAT.md` section 5.
 pub const FILTER_MODE_ADAPTIVE: u8 = 1;
+/// The same five predictors and the same residuals, chosen per 8x8 block instead of per row.
+/// Worth 1.3 to 1.5 points on photographs at no measurable decode cost — see ADR 0010.
+pub const FILTER_MODE_BLOCK: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -51,7 +54,7 @@ pub struct Header {
     pub bit_depth: u8,
     pub block_w: u32,
     pub block_h: u32,
-    /// [`FILTER_MODE_NONE`] or [`FILTER_MODE_ADAPTIVE`].
+    /// [`FILTER_MODE_NONE`], [`FILTER_MODE_ADAPTIVE`] or [`FILTER_MODE_BLOCK`].
     pub filter_mode: u8,
     /// [`BLOCK_CODER_FIXED`], [`BLOCK_CODER_RICE`] or [`BLOCK_CODER_CONTEXT`].
     pub block_coder: u8,
@@ -146,7 +149,7 @@ impl Header {
         required_len(width, height, channels)?;
 
         let filter_mode = bytes[24];
-        if filter_mode > FILTER_MODE_ADAPTIVE {
+        if filter_mode > FILTER_MODE_BLOCK {
             return Err(BrpError::UnsupportedFilterMode(filter_mode));
         }
 
@@ -158,7 +161,7 @@ impl Header {
         let (plan, plan_len) = ChannelPlan::parse(&bytes[CHANNEL_SECTION_AT..], channels)?;
 
         // Prediction with nothing to predict has no canonical encoding; refuse the ambiguity.
-        if filter_mode == FILTER_MODE_ADAPTIVE && plan.coded_count() == 0 {
+        if filter_mode != FILTER_MODE_NONE && plan.coded_count() == 0 {
             return Err(BrpError::FilterWithoutCodedChannels);
         }
 
@@ -241,7 +244,7 @@ mod tests {
     fn field_offsets_match_the_spec() {
         let bytes = encoded(&sample());
         assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-        assert_eq!(bytes[4], 5); // version
+        assert_eq!(bytes[4], 6); // version
         assert_eq!(bytes[5], 0); // flags
         assert_eq!(&bytes[6..10], &640u32.to_le_bytes());
         assert_eq!(&bytes[10..14], &480u32.to_le_bytes());
@@ -266,7 +269,7 @@ mod tests {
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedVersion {
                 found: 3,
-                expected: 5
+                expected: 6
             }
         );
     }
@@ -320,7 +323,7 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_filter_mode() {
-        for mode in 2..=255u8 {
+        for mode in 3..=255u8 {
             let mut bytes = encoded(&sample());
             bytes[24] = mode;
             assert_eq!(

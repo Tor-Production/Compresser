@@ -9,11 +9,11 @@ use crate::context::{ContextModel, Plane};
 use crate::encode::sample_index;
 use crate::error::BrpError;
 use crate::header::{
-    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, FILTER_MODE_ADAPTIVE, WIDTH_CODE_BITS,
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS,
     ZERO_BLOCK_BITS,
 };
 use crate::image::{required_len, RawImage, MAX_CHANNELS};
-use crate::predict::{self, FILTER_KINDS, FILTER_KIND_BITS};
+use crate::predict::{self, FilterLayout, FILTER_KINDS, FILTER_KIND_BITS};
 use crate::rice;
 use crate::Result;
 
@@ -82,11 +82,13 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
         let grid = BlockGrid::new(header.width, header.height, header.block_w, header.block_h);
         let mut reader = BitReader::new(&bytes[header_len..]);
 
-        // The per-row predictors precede the blocks, so they are available before they are needed.
+        // The predictor codes precede the blocks, so they are available before they are needed.
+        // How many there are is what `filter_mode` decides: one per row, or one per 8x8 block.
+        let layout = FilterLayout::from_mode(header.filter_mode);
         let mut kinds = Vec::new();
-        if header.filter_mode == FILTER_MODE_ADAPTIVE {
-            kinds.reserve(header.height as usize);
-            for _ in 0..header.height {
+        if let Some(layout) = layout {
+            kinds.reserve(layout.units(header.width, header.height));
+            for _ in 0..layout.units(header.width, header.height) {
                 let kind = reader.read(FILTER_KIND_BITS)? as u8;
                 if kind >= FILTER_KINDS {
                     return Err(BrpError::InvalidFilterKind(kind));
@@ -104,8 +106,9 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
 
         // Step 2.5: turn residuals back into samples, in raster order so each prediction reads
         // neighbours this loop has already restored.
-        if header.filter_mode == FILTER_MODE_ADAPTIVE {
+        if let Some(layout) = layout {
             predict::undo_in_place(
+                layout,
                 &mut data,
                 header.width,
                 header.height,
@@ -416,7 +419,7 @@ mod tests {
         let smooth = img(32, 32, 3, data);
 
         let off = encode(&smooth, &with_filter(FilterChoice::Off)).unwrap();
-        let on = encode(&smooth, &with_filter(FilterChoice::On)).unwrap();
+        let on = encode(&smooth, &with_filter(FilterChoice::Row)).unwrap();
         let auto = encode(&smooth, &with_filter(FilterChoice::Auto)).unwrap();
 
         assert_eq!(decode(&off).unwrap(), smooth);
@@ -428,7 +431,7 @@ mod tests {
     #[test]
     fn rejects_an_invalid_filter_kind() {
         let src = img(8, 8, 1, (0..64u8).map(|v| v / 2).collect());
-        let mut bytes = encode(&src, &with_filter(FilterChoice::On)).unwrap();
+        let mut bytes = encode(&src, &with_filter(FilterChoice::Row)).unwrap();
         // The first row's predictor occupies the top three bits of the first body byte.
         bytes[27] = (bytes[27] & 0b0001_1111) | 0b1110_0000; // kind 7
         assert_eq!(decode(&bytes).unwrap_err(), BrpError::InvalidFilterKind(7));

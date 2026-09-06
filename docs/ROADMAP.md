@@ -38,33 +38,22 @@ from 60.7% to **58.3%**, and on a 45-megapixel photograph BRP takes the lead ove
 lossless. It is **not** the default: decode halves, and the floor is the model's serial dependency
 rather than the codes, so no bit-level work recovers it.
 
+**A predictor chosen per block** (format v6, ADR 0010) — the same five PNG predictors and the same
+three-bit codes, one per 8x8 square instead of one per row. Photographs go from 60.7% to **59.2%**
+at the documented block size, and from 58.3% to **57.0%** under the context coder, which puts the
+codec ahead of `filter+deflate`'s 57.5% on the small photographs for the first time. Decode does
+not move on photographs. The item this came from was "better predictors": LOCO-I's and CALIC's are
+worth half a point, the unit of choice is worth three times that, and finding 14 has the argument.
+
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, predictor variants including LOCO-I's and CALIC's, and the
-`residual-shape`, `ctx-sweep` and `pred-sweep` tools that measure what the format actually emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
-enough to have justified building the wrong thing.
+`residual-shape`, `ctx-sweep` and `pred-sweep` tools that measure what the format actually emits.
+Plus a real photograph corpus, because the synthetic one flatters this algorithm badly enough to
+have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Choose the predictor per block, not per row  ← next, and now measured
-
-Finding 14 answered the "better predictors" item, and not the way it was written. The candidates
-it named — LOCO-I's MED and CALIC's GAP — are worth about half a point. Offering PNG's *existing*
-five per 8x8 block instead of per row is worth **1.5 points on the photographs under the Rice
-coder and 1.3 under the context coder**, and decodes at the control's rate: same predictors, same
-samples, only the lookup that says which one differs.
-
-Under the context coder that puts the codec at 56.99% against `filter+deflate`'s 57.50% — ahead of
-PNG's approach on the small photographs, which this file had listed as not planned.
-
-What adoption needs: a filter mode saying the kind codes are laid out per block, a prediction grid
-that is **not** stage 2's block size (the shipped default is the whole image, which would turn a
-per-row choice into a per-image one), a version bump and an ADR. At 8x8 the grid is a constant and
-costs no header field.
-
-MED and GAP are a separate, harder decision: another 0.45 points for a quarter of the decode rate,
-in the same place the context coder spends it. Finding 14 leaves them measured and unadopted.
-
-### 2. Adaptive block size
+### 1. Adaptive block size
 
 `quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure is
 now stale three times over: the model assumed fixed-width packing and has to be rewritten around
@@ -74,11 +63,13 @@ rather than twelve, which is most of what made small blocks expensive. Finding 1
 prediction finding 11 made — adaptation across block sizes has lost most of its force. Re-measure
 before implementing.
 
-### 3. Deciding what the documented configuration is
+### 2. Deciding what the documented configuration is
 
 Three block sizes now have a claim: the shipped default is the whole image, every table in
 `EXPERIMENTS.md` quotes 8x8, 16x16 is 0.8 points better under the stored-parameter coders
-(finding 11), and 32x32 is best under the context coder (finding 13). Nothing was changed on the
+(finding 11), and 32x32 is best under the context coder (finding 13). Version 6 leaves that
+untouched — the prediction grid is its own 8x8 and does not borrow the block size — so the decision
+is exactly as open as it was, and the figures it would restate have all moved. Nothing was changed on the
 strength of any of that, because moving the documented grid restates every figure on the page at
 once.
 
@@ -87,6 +78,11 @@ commit, with the whole page re-measured — not drifted into.
 
 ## Later
 
+- **MED and GAP as extra filter kinds.** Measured in finding 14 and not adopted: adding LOCO-I's
+  and CALIC's predictors to the five-kind menu is the smallest file measured — 56.5% under the
+  context coder against 57.0% — for a quarter of the decode rate in the prototype, because a
+  decoder that offers them must be able to run them. The same trade version 5 made, and it needs
+  its own decision rather than arriving beside a free one.
 - **Reversible colour transform** (RGB to YCoCg-R) to remove inter-channel correlation. Cheap and
   lossless, and still untested. Measure it against prediction rather than assuming they add up —
   prediction and range packing looked complementary too, and were not.

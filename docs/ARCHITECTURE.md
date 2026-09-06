@@ -22,7 +22,7 @@ image.rs    RawImage { width, height, channels, data: Vec<u8> }
             Interleaved samples, row-major, no stride padding.
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
 channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
-predict.rs  Stage 1.5 — per-row predictor choice and zigzagged residuals.
+predict.rs  Stage 1.5 — predictor choice per row or per 8x8 block, zigzagged residuals.
 rice.rs     Golomb-Rice codes and per-block parameter choice, two of the three block coders.
 context.rs  The quantised-gradient context model that derives the parameter for the third.
             Normative: encoder and decoder must agree bit for bit. FORMAT.md §6.3.
