@@ -4,8 +4,7 @@
 
 use brp_core::{
     analyze, decode, encode, BrpError, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
-    RawImage,
-};
+    RawImage, RemapChoice};
 
 /// Header length when every channel is coded — no alias byte, no constants.
 const BODY_AT: usize = 27;
@@ -33,9 +32,101 @@ fn sample_file() -> Vec<u8> {
             channels: ALL_CODED,
             filter: FilterChoice::Off,
             coder: CoderChoice::Fixed,
+            // Pinned off: these tests index the header by hand, and a map section would move
+            // everything after it.
+            remap: RemapChoice::Off,
         },
     )
     .unwrap()
+}
+
+/// A file that really carries an alphabet map: 16x8 grey cycling 0, 1, 2, 4, so value 3 is a gap.
+fn mapped_file() -> Vec<u8> {
+    let data: Vec<u8> = (0..128).map(|i| [0u8, 1, 2, 4][i % 4]).collect();
+    let src = RawImage::new(16, 8, 1, data).unwrap();
+    let bytes = encode(
+        &src,
+        &EncodeOptions {
+            block_size: None,
+            channels: ALL_CODED,
+            filter: FilterChoice::Off,
+            coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
+        },
+    )
+    .unwrap();
+    assert_eq!(bytes[5], brp_core::FLAG_ALPHABET_MAPS, "the map must fire");
+    bytes
+}
+
+/// Where the map section starts in `mapped_file`: the fixed header plus one modes byte.
+const MAP_AT: usize = 27;
+
+#[test]
+fn arbitrary_alphabet_forms() {
+    let original = mapped_file();
+    for form in 0..=255u8 {
+        let mut bytes = original.clone();
+        bytes[MAP_AT] = form;
+        let decoded = decode(&bytes);
+        let analyzed = analyze(&bytes);
+        assert_eq!(
+            decoded.is_ok(),
+            analyzed.is_ok(),
+            "decode and analyze disagree on alphabet form {form}"
+        );
+        if form > 2 {
+            assert!(matches!(
+                decoded.unwrap_err(),
+                BrpError::UnsupportedAlphabetForm(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn a_truncated_alphabet_section_is_refused() {
+    let original = mapped_file();
+    for cut in MAP_AT..MAP_AT + 4 {
+        let bytes = &original[..cut];
+        assert!(decode(bytes).is_err(), "{cut} bytes should not decode");
+        assert!(analyze(bytes).is_err(), "{cut} bytes should not analyze");
+    }
+}
+
+#[test]
+fn an_inverted_alphabet_range_is_refused() {
+    let mut bytes = mapped_file();
+    bytes[MAP_AT + 1] = 200; // lo
+    bytes[MAP_AT + 2] = 100; // hi
+    assert!(matches!(
+        decode(&bytes).unwrap_err(),
+        BrpError::AlphabetRangeInverted { lo: 200, hi: 100 }
+    ));
+}
+
+/// A map that shrinks below what the block stream names must be caught, not read out of bounds.
+#[test]
+fn a_rank_outside_the_alphabet_is_refused() {
+    let mut bytes = mapped_file();
+    // Clear the bitmap: the channel then claims to use only its two endpoints, while the block
+    // stream still names four ranks.
+    bytes[MAP_AT + 3] = 0;
+    assert!(matches!(
+        decode(&bytes).unwrap_err(),
+        BrpError::AlphabetRankOutOfRange { .. }
+    ));
+}
+
+/// Padding bits in the bitmap are the one place a map could have two encodings. It must not.
+#[test]
+fn alphabet_bitmap_padding_must_be_zero() {
+    let mut bytes = mapped_file();
+    bytes[MAP_AT + 3] |= 0x01;
+    assert_eq!(
+        decode(&bytes).unwrap_err(),
+        BrpError::AlphabetPaddingSet
+    );
 }
 
 #[test]
@@ -151,10 +242,10 @@ fn one_corrupt_byte_cannot_demand_an_enormous_allocation() {
     ));
 }
 
-/// Version 3 reserves the whole flags byte.
+/// Version 7 defines bit 0 of the flags byte; the other seven are still reserved.
 #[test]
 fn reserved_flag_bits_are_rejected() {
-    for bit in 0..8 {
+    for bit in 1..8 {
         let mut bytes = sample_file();
         bytes[5] = 1 << bit;
         assert!(matches!(
@@ -162,6 +253,12 @@ fn reserved_flag_bits_are_rejected() {
             BrpError::ReservedFlagsSet(_)
         ));
     }
+
+    // Bit 0 is not reserved, but claiming a section that is not there is still refused.
+    let mut bytes = sample_file();
+    bytes[5] = brp_core::FLAG_ALPHABET_MAPS;
+    assert!(decode(&bytes).is_err());
+    assert!(analyze(&bytes).is_err());
 }
 
 #[test]
@@ -191,6 +288,7 @@ fn arbitrary_channel_modes() {
                 channels: ALL_CODED,
                 filter: FilterChoice::Off,
                 coder: CoderChoice::Fixed,
+                remap: RemapChoice::Gaps,
             },
         )
         .unwrap();
@@ -219,6 +317,7 @@ fn alias_validation() {
         &EncodeOptions {
             filter: FilterChoice::Off,
             coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
             ..Default::default()
         },
     )
@@ -302,6 +401,7 @@ fn invalid_filter_kinds_are_rejected() {
             channels: ALL_CODED,
             filter: FilterChoice::Row,
             coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
         },
     )
     .unwrap();
@@ -359,6 +459,7 @@ fn truncated_context_streams_are_rejected() {
             channels: ALL_CODED,
             filter: FilterChoice::Row,
             coder: CoderChoice::Context,
+            remap: RemapChoice::Gaps,
         },
     )
     .unwrap();
@@ -392,6 +493,7 @@ fn corrupt_context_bodies_never_panic() {
             channels: ALL_CODED,
             filter: FilterChoice::Off,
             coder: CoderChoice::Context,
+            remap: RemapChoice::Gaps,
         },
     )
     .unwrap();
@@ -421,6 +523,7 @@ fn corrupt_rice_modes_are_rejected() {
             channels: ALL_CODED,
             filter: FilterChoice::Off,
             coder: CoderChoice::Rice,
+            remap: RemapChoice::Gaps,
         },
     )
     .unwrap();

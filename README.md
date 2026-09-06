@@ -22,7 +22,11 @@ one byte for its value replaces the whole channel.
 
 ## Status
 
-Format version 6. Four stages, each admitted only after measurement said so.
+Format version 7. Five stages, each admitted only after measurement said so.
+
+**Stage 0.5** compacts a channel's alphabet: if a channel leaves gaps *inside* its own range, its
+samples become their rank among the values it does use. A text page's `{0, 255}` becomes `{0, 1}`,
+and because this runs before stage 1, three channels that were not identical often become so.
 
 **Stage 1** removes whole-image redundancy: a channel whose samples are all identical becomes one
 header byte, and a channel identical to an earlier one becomes a reference. A solid colour is a
@@ -88,6 +92,10 @@ Findings worth stating plainly, all in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md
   to cost more encode throughput than Rice did. Fixing what the measurements actually pointed at
   bought 1.6-1.9x on encode with no change to a single output bit. Decode then became the weak
   side, and a refilling bit reader bought 1.2-1.9x there — also without changing an output bit.
+- **A text page is four times smaller for a table of missing values.** Compacting a channel's
+  alphabet is worth 1.1 points on synthetic content, nothing on photographs, and nothing in speed —
+  provided the criterion is gaps *inside* the channel's range rather than values missing from
+  0..=255, and provided it runs before the channel reduction rather than after it.
 - **The unit of choice beat the better predictor.** Roadmap item 1 was going to adopt LOCO-I's or
   CALIC's gradient predictor; both are worth about half a point. Choosing among PNG's *existing*
   five per 8x8 block instead of per row is worth three times that, at no measurable decode cost on

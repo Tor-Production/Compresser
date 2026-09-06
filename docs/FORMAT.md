@@ -1,4 +1,4 @@
-# BRP v5 — Block Range Packing bitstream specification
+# BRP v7 — Block Range Packing bitstream specification
 
 **Status:** normative. The implementation in `crates/brp-core` MUST match this document.
 Golden-byte tests in `crates/brp-core/tests/golden.rs` enforce the match. Any change to this
@@ -11,6 +11,11 @@ of an image, a channel usually spans far fewer distinct values than its full dyn
 fewer than `bit_depth` bits per sample are needed.
 
 Encoding happens in three stages.
+
+**Stage 0.5, alphabet compaction.** Optional, and recorded in the header. A channel that never
+uses some of the values *inside its own range* has its samples replaced by their rank among the
+values it does use, so a channel holding only 0 and 255 holds only 0 and 1. Everything after this
+point works on ranks. See section 3.4.
 
 **Stage 1, whole-image channel reduction.** Before any blocks are considered, each channel is
 classified:
@@ -63,12 +68,12 @@ Byte-aligned, at offset 0.
 | Offset | Field           | Size | Notes                                                    |
 |-------:|-----------------|-----:|----------------------------------------------------------|
 | 0      | `magic`         | 4 B  | `42 52 50 1A` — ASCII `BRP` followed by 0x1A              |
-| 4      | `version`       | u8   | `6`                                                       |
-| 5      | `flags`         | u8   | all bits reserved, MUST be 0                              |
+| 4      | `version`       | u8   | `7`                                                       |
+| 5      | `flags`         | u8   | bit 0: an `alphabet_maps` section follows; bits 1-7 MUST be 0 |
 | 6      | `width`         | u32  | pixels, MUST be > 0                                       |
 | 10     | `height`        | u32  | pixels, MUST be > 0                                       |
 | 14     | `channels`      | u8   | 1 = Gray, 2 = Gray+Alpha, 3 = RGB, 4 = RGBA               |
-| 15     | `bit_depth`     | u8   | MUST be 8 in version 6                                    |
+| 15     | `bit_depth`     | u8   | MUST be 8 in version 7                                    |
 | 16     | `block_w`       | u32  | pixels, MUST be > 0                                       |
 | 20     | `block_h`       | u32  | pixels, MUST be > 0                                       |
 | 24     | `filter_mode`   | u8   | 0 = none, 1 = per row, 2 = per 8x8 block — see section 5   |
@@ -76,13 +81,15 @@ Byte-aligned, at offset 0.
 | 26     | `channel_modes` | u8   | 2 bits per channel — see 3.1                              |
 | 27     | `alias_targets` | u8   | **present only if at least one channel is ALIAS** — see 3.2 |
 | …      | `constants`     | n B  | one byte per CONSTANT channel, ascending channel order    |
+| …      | `alphabet_maps` | n B  | **present only if `flags` bit 0 is set** — see 3.4         |
 
 The trailing 0x1A in the magic is the same trick PNG uses: it terminates output under `type` on
 DOS-derived shells and turns text-mode mangling into an early mismatch instead of silent
 corruption. The magic carries no version, so the `version` byte is the single source of truth.
 
-Header length is therefore `27 + (1 if any alias) + (number of constant channels)`, between 27 and
-32 bytes. The body bitstream starts at the next byte.
+Header length is therefore `27 + (1 if any alias) + (number of constant channels)`, plus the
+`alphabet_maps` section when `flags` bit 0 is set — between 27 and 32 bytes without maps, and at
+most 4 x 36 bytes more with them. The body bitstream starts at the next byte.
 
 `filter_mode` MUST be 0 when no channel is `CODED`: with nothing to predict, prediction has no
 canonical encoding, and allowing the other values would make three different files mean the same
@@ -117,6 +124,53 @@ alias of 0 and B as an alias of 1.
 
 One byte per channel whose mode is `CONSTANT`, in ascending channel order. A file where every
 channel is constant — a solid-colour image of any size — consists of nothing but this header.
+
+### 3.4 `alphabet_maps`
+
+Present only when bit 0 of `flags` is set, and then it holds **one entry per channel**, in
+ascending channel order — including channels that are `CONSTANT` or `ALIAS`.
+
+Each entry begins with a `form` byte:
+
+| Form | Meaning |
+|-----:|---------|
+| 0 | The channel is not remapped. The entry is this byte alone. |
+| 1 | Bitmap. |
+| 2 | List. |
+| 3..255 | Reserved. MUST be rejected. |
+
+Forms 1 and 2 continue with `lo` and `hi`, the lowest and highest value the channel uses.
+`lo <= hi` MUST hold, and both are always present in the alphabet. They differ only in how the
+values *strictly between* them are named:
+
+- **Form 1, bitmap.** `ceil((hi - lo - 1) / 8)` bytes. Bit `i`, counting from the most significant
+  bit of the first byte, is 1 when value `lo + 1 + i` is used. Padding bits in the last byte MUST
+  be 0.
+- **Form 2, list.** A count byte, then that many values, each strictly between `lo` and `hi`, in
+  **strictly ascending** order, naming the values the channel does *not* use.
+
+Both forms name the same thing and an encoder MUST NOT be assumed to prefer either; the reference
+encoder writes whichever is shorter. The two rules above — zero padding, ascending list — exist so
+that one alphabet has exactly one encoding in each form.
+
+The alphabet is then the used values in ascending order, and a channel's samples are replaced by
+their **rank** in it: the smallest used value becomes 0, the next 1, and so on. Everything after
+this section — stage 1, prediction, both Rice coders — sees ranks. A decoder turns them back last
+of all, in step 5 of section 7.
+
+A section where every entry is form 0 MUST be rejected: it says nothing, and a file that says
+nothing must not set the flag.
+
+**Why this sits before stage 1.** Two channels that use different pairs of values are not aliases,
+but their ranks can be identical, and stage 1 can then elide one of them. On `text-page.png` the
+three channels each use two values and none aliases another; after compaction all three carry the
+same ranks, green and blue become aliases, and the file goes from 10.0% of raw to 3.38%. ADR 0011
+has the measurements.
+
+**What a decoder must not assume.** A rank read from the block stream can name a value the
+alphabet does not have — a corrupt or hostile file will — so every rank MUST be checked against the
+alphabet size and the file rejected if it is out of range. Ranks are also what stage 1's
+`CONSTANT` values and `ALIAS` copies carry when their channel has a map.
 
 ## 4. Block grid
 
@@ -382,16 +436,19 @@ A decoder fills the sample buffer in this order:
 2. Coded channels, from the block stream — residuals, if prediction is on.
 3. Undo prediction, in raster order.
 4. Alias channels, copied from their targets.
+5. Undo the alphabet maps of section 3.4, per channel.
 
 Step 3 must run in raster order, because each prediction reads neighbours that the same loop has
-already restored. Aliases resolve last because their targets are coded channels, which do not hold
-final values until step 3.
+already restored. Aliases resolve after it because their targets are coded channels, which do not
+hold final values until step 3. Unmapping is last because stage 1 works in rank space: an alias
+copies its target's *ranks*, and each channel then turns its own ranks back with its own table.
 
 ## 8. Size accounting
 
 For one block of `n = bw * bh` pixels over `k = coded_channels.len()` channels:
 
 ```
+alphabet bits   = 8 per channel, plus 16 + the map body per mapped channel
 prediction bits = height * 3                       (filter_mode 1)
                   ceil(w/8) * ceil(h/8) * 3        (filter_mode 2)
 header bits     = k * (bit_depth + 4)              under block_coder 0 and 1
@@ -416,14 +473,20 @@ overhead — and instead costs 28 bytes in total.
 A decoder MUST reject, with an error and never a panic:
 
 - `magic` != `42 52 50 1A`
-- `version` != 6
+- `version` != 7
 - `channels` not in {1, 2, 3, 4}
 - `bit_depth` != 8
 - any of `width`, `height`, `block_w`, `block_h` == 0
-- reserved flag bits non-zero
+- flag bits 1-7 non-zero
 - `filter_mode` above 2
 - `filter_mode` of 1 or 2 with no `CODED` channel
 - a filter kind above 4
+- an `alphabet_maps` `form` above 2
+- an alphabet range with `lo` above `hi`
+- an alphabet bitmap with padding bits set
+- an alphabet list that is not strictly ascending, or that names `lo`, `hi`, or a value outside them
+- an `alphabet_maps` section in which every entry is form 0
+- a rank that the channel's alphabet has no value for
 - `block_coder` above 2
 - a width code above `bit_depth`, under `block_coder` 0
 - a Rice mode above 9, under `block_coder` 1
@@ -470,3 +533,4 @@ whatever bits the file contains, so neither can index out of range.
 | 4 | Golomb-Rice as an alternative block coder, selected per file by a new `block_coder` header byte. Gives up the ability to compute a block's payload size from its headers. |
 | 5 | A third block coder: the same Rice codes with the parameter derived from a context of quantised local gradients rather than stored per block. Drops the base and the parameter field, and adds a one-bit escape. Not the default — it trades decode speed for ratio. ADR 0009. |
 | 6 | `filter_mode` 2: the same five predictors chosen per 8x8 block instead of per row. Worth 1.3 to 1.5 points on photographs at the same decode rate, and `Auto` reaches for it only where prediction is already winning. ADR 0010. |
+| 7 | `alphabet_maps`: a channel that leaves gaps inside its own range is renumbered so its values are contiguous, before stage 1 rather than after it. Worth 1.1 points on synthetic content and nothing on photographs; a text page goes from 14.9% of raw to 3.4%. Costs a flag bit and a per-channel table. ADR 0011. |

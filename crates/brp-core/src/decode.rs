@@ -2,6 +2,7 @@
 //!
 //! Everything read from the bitstream is untrusted until validated. See `docs/FORMAT.md` section 8.
 
+use crate::alphabet;
 use crate::bitio::BitReader;
 use crate::block::BlockGrid;
 use crate::channels::{ChannelMode, CodedIndices};
@@ -132,6 +133,10 @@ pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<RawImage> {
         }
     }
 
+    // Step 4: turn ranks back into samples, last, because stage 1 worked in rank space — an alias
+    // copied its target's ranks and each channel has its own table.
+    alphabet::undo_in_place(&mut data, stride, &header.alphabet)?;
+
     RawImage::new(header.width, header.height, header.channels, data)
 }
 
@@ -258,6 +263,7 @@ fn read_context_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alphabet::RemapChoice;
     use crate::channels::ChannelOptions;
     use crate::encode::{encode, CoderChoice, EncodeOptions, FilterChoice};
 
@@ -391,6 +397,7 @@ mod tests {
             },
             filter: FilterChoice::Off,
             coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
         };
         let all_coded = encode(&src, &opts).unwrap();
         let reduced = encode(&src, &plain()).unwrap();

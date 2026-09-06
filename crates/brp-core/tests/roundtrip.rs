@@ -2,8 +2,7 @@
 
 use brp_core::{
     analyze, decode, encode, ChannelMode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
-    RawImage,
-};
+    RawImage, RemapChoice};
 
 /// Every block size worth exercising, including ones that do not divide the image evenly.
 const BLOCK_SIZES: &[Option<(u32, u32)>] = &[
@@ -45,6 +44,9 @@ const FILTERS: &[FilterChoice] = &[
     FilterChoice::Auto,
 ];
 
+/// Both alphabet policies, so a map that fires cannot hide a bug and neither can one that does not.
+const REMAPS: &[RemapChoice] = &[RemapChoice::Off, RemapChoice::Gaps];
+
 /// Every block coder, likewise.
 const CODERS: &[CoderChoice] = &[
     CoderChoice::Fixed,
@@ -58,20 +60,23 @@ fn assert_round_trips(src: &RawImage) {
         for &channels in CHANNEL_OPTIONS {
             for &filter in FILTERS {
                 for &coder in CODERS {
-                    let opts = EncodeOptions {
-                        block_size,
-                        channels,
-                        filter,
-                        coder,
-                    };
-                    let bytes = encode(src, &opts).unwrap();
-                    let back = decode(&bytes).unwrap();
-                    assert_eq!(
-                        &back, src,
-                        "block {block_size:?}, channels {channels:?}, filter {filter:?}, coder {coder:?}"
-                    );
-                    // Anything that decodes must also analyze, and vice versa.
-                    analyze(&bytes).unwrap();
+                    for &remap in REMAPS {
+                        let opts = EncodeOptions {
+                            block_size,
+                            channels,
+                            filter,
+                            coder,
+                            remap,
+                        };
+                        let bytes = encode(src, &opts).unwrap();
+                        let back = decode(&bytes).unwrap();
+                        assert_eq!(
+                            &back, src,
+                            "block {block_size:?}, channels {channels:?}, filter {filter:?},                              coder {coder:?}, remap {remap:?}"
+                        );
+                        // Anything that decodes must also analyze, and vice versa.
+                        analyze(&bytes).unwrap();
+                    }
                 }
             }
         }
@@ -83,6 +88,7 @@ fn no_filter() -> EncodeOptions {
     EncodeOptions {
         filter: FilterChoice::Off,
         coder: CoderChoice::Fixed,
+        remap: RemapChoice::Gaps,
         ..Default::default()
     }
 }
@@ -198,6 +204,7 @@ fn constant_alpha_variants() {
                     channels: ChannelOptions::default(),
                     filter: FilterChoice::Off,
                     coder: CoderChoice::Fixed,
+                    remap: RemapChoice::Gaps,
                 },
             )
             .unwrap();
@@ -211,6 +218,7 @@ fn constant_alpha_variants() {
                     },
                     filter: FilterChoice::Off,
                     coder: CoderChoice::Fixed,
+                    remap: RemapChoice::Gaps,
                 },
             )
             .unwrap();

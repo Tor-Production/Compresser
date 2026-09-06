@@ -1,8 +1,7 @@
 //! Property tests for the two invariants that matter most: losslessness, and never panicking.
 
 use brp_core::{
-    analyze, decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage,
-};
+    analyze, decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage, RemapChoice};
 use proptest::prelude::*;
 
 /// An arbitrary image: dimensions up to 32x32, any channel count, arbitrary samples.
@@ -27,6 +26,10 @@ fn arb_coder() -> impl Strategy<Value = CoderChoice> {
         Just(CoderChoice::Context),
         Just(CoderChoice::Auto),
     ]
+}
+
+fn arb_remap() -> impl Strategy<Value = RemapChoice> {
+    prop_oneof![Just(RemapChoice::Off), Just(RemapChoice::Gaps)]
 }
 
 fn arb_filter() -> impl Strategy<Value = FilterChoice> {
@@ -57,8 +60,9 @@ proptest! {
         channels in arb_channel_options(),
         filter in arb_filter(),
         coder in arb_coder(),
+        remap in arb_remap(),
     ) {
-        let opts = EncodeOptions { block_size, channels, filter, coder };
+        let opts = EncodeOptions { block_size, channels, filter, coder, remap };
         let bytes = encode(&src, &opts).unwrap();
         let back = decode(&bytes).unwrap();
         prop_assert_eq!(back, src);
@@ -77,6 +81,7 @@ proptest! {
             channels: ChannelOptions::default(),
             filter,
             coder,
+            remap: RemapChoice::Gaps,
         };
         prop_assert_eq!(encode(&src, &opts).unwrap(), encode(&src, &opts).unwrap());
     }
@@ -94,6 +99,7 @@ proptest! {
             channels: ChannelOptions::default(),
             filter,
             coder,
+            remap: RemapChoice::Gaps,
         };
         let bytes = encode(&src, &opts).unwrap();
         let a = analyze(&bytes).unwrap();
@@ -114,6 +120,7 @@ proptest! {
             channels: ChannelOptions::default(),
             filter,
             coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
         };
         let off = encode(&src, &base(FilterChoice::Off)).unwrap().len();
         let by_row = encode(&src, &base(FilterChoice::Row)).unwrap().len();
@@ -139,6 +146,7 @@ proptest! {
             channels: ChannelOptions::default(),
             filter: FilterChoice::Off,
             coder,
+            remap: RemapChoice::Gaps,
         };
         let fixed = encode(&src, &base(CoderChoice::Fixed)).unwrap().len();
         let rice = encode(&src, &base(CoderChoice::Rice)).unwrap().len();
@@ -176,6 +184,7 @@ proptest! {
             channels: ChannelOptions { constants: false, aliases: false },
             filter: FilterChoice::Off,
             coder: CoderChoice::Fixed,
+            remap: RemapChoice::Gaps,
         };
         let mut bytes = encode(&src, &opts).unwrap();
         assert_eq!(bytes.len().min(27), 27);

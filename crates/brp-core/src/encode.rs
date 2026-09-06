@@ -1,5 +1,6 @@
 //! Encoder. Mirror of [`crate::decode`] — change both together.
 
+use crate::alphabet::{self, RemapChoice};
 use crate::bitio::BitWriter;
 use crate::block::{BlockGrid, BlockRect};
 use crate::channels::{self, ChannelOptions};
@@ -56,6 +57,9 @@ pub struct EncodeOptions {
     pub channels: ChannelOptions,
     /// Whether to predict before packing.
     pub filter: FilterChoice,
+    /// Whether a coded channel that leaves gaps inside its own range is renumbered so its values
+    /// are contiguous. See `FORMAT.md` 3.4 and ADR 0011.
+    pub remap: RemapChoice,
     /// How to write each block's residuals.
     pub coder: CoderChoice,
 }
@@ -209,9 +213,19 @@ fn encode_with_filter(
     }
 
     let stride = usize::from(img.channels());
-    let source = img.data();
 
-    // Stage 1: classify channels across the whole image, from the samples themselves.
+    // Stage 0.5: compact the alphabet of any channel that leaves gaps inside its own range. This
+    // runs *before* stage 1 on purpose: two channels that use different pairs of values are not
+    // aliases, but their ranks may be, and stage 1 can then elide one of them. See ADR 0011.
+    let alphabet = alphabet::plan(img.data(), stride, opts.remap);
+    let remapped = alphabet.any().then(|| {
+        let mut data = img.data().to_vec();
+        alphabet::apply_in_place(&mut data, stride, &alphabet);
+        data
+    });
+    let source: &[u8] = remapped.as_deref().unwrap_or(img.data());
+
+    // Stage 1: classify channels across the whole image, from the ranks stage 0.5 produced.
     let plan = channels::plan(source, img.channels(), &opts.channels);
     let coded = plan.coded_indices();
 
@@ -250,6 +264,7 @@ fn encode_with_filter(
         filter_mode: layout.map_or(FILTER_MODE_NONE, FilterLayout::mode),
         block_coder,
         plan,
+        alphabet,
     };
 
     let mut out = Vec::with_capacity(HEADER_BASE_SIZE + MAX_CHANNELS + data.len());

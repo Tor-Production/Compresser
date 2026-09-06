@@ -42,6 +42,28 @@ pub enum BrpError {
     #[error("prediction is enabled but no channel reaches the block stream")]
     FilterWithoutCodedChannels,
 
+    #[error("the alphabet map section ends mid-map")]
+    AlphabetTruncated,
+
+    #[error("unsupported alphabet map form {0}, version 7 defines 0, 1 and 2")]
+    UnsupportedAlphabetForm(u8),
+
+    #[error("alphabet range {lo}..={hi} is inverted")]
+    AlphabetRangeInverted { lo: u8, hi: u8 },
+
+    #[error("alphabet gap list is not strictly ascending inside its range at {0}")]
+    AlphabetListDisordered(u8),
+
+    #[error("alphabet bitmap has padding bits set")]
+    AlphabetPaddingSet,
+
+    #[error("the alphabet map section is present but maps nothing")]
+    AlphabetSectionEmpty,
+
+
+    #[error("rank {rank} is outside an alphabet of {size} values")]
+    AlphabetRankOutOfRange { rank: u8, size: usize },
+
     #[error("channel mode 3 is reserved (modes byte names it)")]
     ReservedChannelMode(u8),
 

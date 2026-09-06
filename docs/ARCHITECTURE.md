@@ -21,6 +21,7 @@ error.rs    BrpError — one typed error per validation rule in FORMAT.md §8.
 image.rs    RawImage { width, height, channels, data: Vec<u8> }
             Interleaved samples, row-major, no stride padding.
 bitio.rs    BitWriter / BitReader. MSB-first. The only place bit order is decided.
+alphabet.rs Stage 0.5 — per-channel alphabet compaction and its header section.
 channels.rs Stage 1 — classifies each channel as coded, constant, or an alias of an earlier one.
 predict.rs  Stage 1.5 — predictor choice per row or per 8x8 block, zigzagged residuals.
 rice.rs     Golomb-Rice codes and per-block parameter choice, two of the three block coders.

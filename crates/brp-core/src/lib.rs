@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alphabet;
 mod analysis;
 mod bitio;
 mod block;
@@ -31,6 +32,7 @@ mod image;
 mod predict;
 mod rice;
 
+pub use alphabet::{AlphabetMap, AlphabetMaps, RemapChoice};
 pub use analysis::{analyze, Analysis, BlockInfo};
 pub use bitio::{BitReader, BitWriter};
 pub use block::{BlockGrid, BlockRect};
@@ -40,8 +42,8 @@ pub use encode::{encode, CoderChoice, EncodeOptions, FilterChoice};
 pub use error::BrpError;
 pub use header::{
     Header, BIT_DEPTH, BLOCK_CODER_CONTEXT, BLOCK_CODER_FIXED, BLOCK_CODER_RICE,
-    FILTER_MODE_ADAPTIVE, FILTER_MODE_BLOCK, FILTER_MODE_NONE, HEADER_BASE_SIZE, MAGIC, VERSION,
-    WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
+    FILTER_MODE_ADAPTIVE, FILTER_MODE_BLOCK, FILTER_MODE_NONE, FLAG_ALPHABET_MAPS,
+    HEADER_BASE_SIZE, MAGIC, VERSION, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
 };
 pub use image::{required_len, RawImage, MAX_CHANNELS};
 pub use predict::{

@@ -45,6 +45,13 @@ codec ahead of `filter+deflate`'s 57.5% on the small photographs for the first t
 not move on photographs. The item this came from was "better predictors": LOCO-I's and CALIC's are
 worth half a point, the unit of choice is worth three times that, and finding 14 has the argument.
 
+**Alphabet compaction** (format v7, ADR 0011) — a channel that leaves gaps inside its own range is
+renumbered so its values are contiguous, before stage 1 rather than after it. The synthetic corpus
+goes from 25.93% of raw to **24.82%** at 16x16; a text page goes from 14.85% to **3.38%**, most of
+that because compaction makes its three channels identical and stage 1 then elides two. Photographs
+do not move, and neither does throughput. The criterion is the finding: thresholding on values
+missing from 0..=255 instead costs six images up to 0.25 points.
+
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, predictor variants including LOCO-I's and CALIC's, and the
 `residual-shape`, `ctx-sweep`, `pred-sweep`, `block-sweep` and `quadtree-rice` tools that measure
@@ -54,24 +61,7 @@ have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Compacting a channel's alphabet  ← next, and the cheapest win left
-
-Finding 17. If a channel never uses some values *from inside its own range*, renumber the ones it
-does use so they are contiguous, before prediction. A text page goes from 14.85% of raw to
-**3.38%**, `screenshot-like` from 7.53% to 2.50%, and the synthetic corpus overall from 25.93% to
-**24.82%**. Photographs do not move and neither does throughput: the census is one pass over the
-samples and applying the map is a byte lookup.
-
-The criterion is the whole design. Thresholding on values missing from 0..=255 fires on channels
-that use a contiguous band — which stage 2's per-block base already handles — and costs six images
-between 0.01 and 0.25 points. Thresholding on gaps *inside* the range fires only where there is
-something to win, and no image in the corpus regresses.
-
-What adoption needs: a header flag per channel, a table (a list of missing values or a bitmap over
-the range, whichever is smaller), a version bump and an ADR. The transform sits in stage 1, beside
-the constant and alias elision it resembles.
-
-### 2. Deciding what the documented configuration is
+### 1. Deciding what the documented configuration is
 
 Finding 15 swept every block size on every image — the whole image, the image halved repeatedly,
 and fixed squares — and the answer is no longer split:

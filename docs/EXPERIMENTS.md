@@ -924,6 +924,23 @@ best block size:
 Nothing regressed, including the synthetic corpus, because the choice is made per image against a
 measured size rather than assumed.
 
+Version 7 (ADR 0011) adds alphabet compaction ahead of stage 1. It moves the synthetic corpus and
+leaves photographs exactly where they were:
+
+| | v6 | v7 |
+|---|---:|---:|
+| `brp[8x8,auto,bestcoder]`, synthetic | 26.52% | **25.65%** |
+| `brp[16x16,auto,bestcoder]`, synthetic | 25.93% | **24.82%** |
+| `brp[32x32,auto,ctxrice]`, synthetic | 26.76% | **25.20%** |
+| photographs, all three configurations | 59.22 / 58.38 / 56.99% | unchanged |
+| 130 MiB photograph, 16x16 | 31.89% | unchanged |
+
+The shipped transform reproduces the lab prototype to the decimal — 24.82% on the synthetic corpus,
+3.38% on `text-page` — as versions 4, 5 and 6 did. The prototype had the ordering right by
+accident, because it remapped an image before handing it to the encoder; the first version of the
+*format* put the maps after stage 1 and measured 10.0% on that image instead. That is the whole
+gap between a transform and where it sits.
+
 ## What this says to do next
 
 1. ~~Adopt prediction with zigzagged residuals.~~ Done, version 3.
@@ -947,11 +964,10 @@ measured size rather than assumed.
    decode, so that is what ADR 0010 adopted. MED and GAP stay measured and unadopted until
    somebody wants 0.45 points at a quarter of the decode rate.
 
-7. **Compacting a channel's alphabet.** Finding 17: renumbering the values a channel actually
-   uses is worth 1.11 points on the synthetic corpus, nothing on photographs, and nothing
-   measurable in speed, provided the criterion is gaps *inside* the channel's range rather than
-   values missing from 0..=255. A text page goes from 14.85% of raw to 3.38%. This is the largest
-   untaken win on the board and the cheapest to implement.
+7. ~~Compacting a channel's alphabet.~~ Done, version 7, ADR 0011: 1.1 points on the synthetic
+   corpus, nothing on photographs, nothing in speed. The ordering turned out to matter more than
+   the transform — before stage 1 a text page is 3.38% of raw, after it 10.0% — because compaction
+   is what makes three channels identical enough to alias.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
 per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage

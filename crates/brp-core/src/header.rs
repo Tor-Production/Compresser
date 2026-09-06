@@ -1,5 +1,6 @@
 //! The byte-aligned file header. See `docs/FORMAT.md` section 3.
 
+use crate::alphabet::AlphabetMaps;
 use crate::channels::{ChannelPlan, CodedIndices};
 use crate::error::BrpError;
 use crate::image::required_len;
@@ -11,7 +12,7 @@ use crate::Result;
 /// Version-independent by design — the `version` byte is the single source of truth. See ADR 0004.
 pub const MAGIC: [u8; 4] = [b'B', b'R', b'P', 0x1A];
 
-pub const VERSION: u8 = 6;
+pub const VERSION: u8 = 7;
 
 /// The only bit depth version 6 defines.
 pub const BIT_DEPTH: u8 = 8;
@@ -38,6 +39,9 @@ pub const BLOCK_CODER_RICE: u8 = 1;
 /// the slowest to decode — see `FORMAT.md` 6.3 and ADR 0009.
 pub const BLOCK_CODER_CONTEXT: u8 = 2;
 
+/// `flags` bit 0: an alphabet map section follows the channel plan. See `FORMAT.md` 3.4.
+pub const FLAG_ALPHABET_MAPS: u8 = 0x01;
+
 /// Prediction is off: the block stream codes samples directly.
 pub const FILTER_MODE_NONE: u8 = 0;
 /// Adaptive per-row predictor with zigzagged residuals, as in `FORMAT.md` section 5.
@@ -59,12 +63,14 @@ pub struct Header {
     /// [`BLOCK_CODER_FIXED`], [`BLOCK_CODER_RICE`] or [`BLOCK_CODER_CONTEXT`].
     pub block_coder: u8,
     pub plan: ChannelPlan,
+    /// One optional alphabet map per coded channel. Empty costs nothing in the file.
+    pub alphabet: AlphabetMaps,
 }
 
 impl Header {
     /// Serialized length of this header, in bytes.
     pub fn byte_len(&self) -> usize {
-        CHANNEL_SECTION_AT + self.plan.byte_len()
+        CHANNEL_SECTION_AT + self.plan.byte_len() + self.alphabet.byte_len()
     }
 
     /// Channels that appear in the block stream. May be zero.
@@ -84,7 +90,11 @@ impl Header {
     pub fn write_to(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&MAGIC);
         out.push(VERSION);
-        out.push(0); // flags: all reserved in version 2
+        out.push(if self.alphabet.any() {
+            FLAG_ALPHABET_MAPS
+        } else {
+            0
+        });
         out.extend_from_slice(&self.width.to_le_bytes());
         out.extend_from_slice(&self.height.to_le_bytes());
         out.push(self.channels);
@@ -94,6 +104,7 @@ impl Header {
         out.push(self.filter_mode);
         out.push(self.block_coder);
         self.plan.write_to(out);
+        self.alphabet.write_to(out);
     }
 
     /// Parses and fully validates a header, returning it with the number of bytes consumed.
@@ -118,7 +129,7 @@ impl Header {
             });
         }
         let flags = bytes[5];
-        if flags != 0 {
+        if flags & !FLAG_ALPHABET_MAPS != 0 {
             return Err(BrpError::ReservedFlagsSet(flags));
         }
 
@@ -165,6 +176,13 @@ impl Header {
             return Err(BrpError::FilterWithoutCodedChannels);
         }
 
+        let at = CHANNEL_SECTION_AT + plan_len;
+        let (alphabet, alphabet_len) = if flags & FLAG_ALPHABET_MAPS == 0 {
+            (AlphabetMaps::none(usize::from(channels)), 0)
+        } else {
+            AlphabetMaps::parse(bytes.get(at..).unwrap_or(&[]), usize::from(channels))?
+        };
+
         Ok((
             Self {
                 width,
@@ -176,8 +194,9 @@ impl Header {
                 filter_mode,
                 block_coder,
                 plan,
+                alphabet,
             },
-            CHANNEL_SECTION_AT + plan_len,
+            at + alphabet_len,
         ))
     }
 }
@@ -198,6 +217,7 @@ mod tests {
             filter_mode: FILTER_MODE_NONE,
             block_coder: BLOCK_CODER_FIXED,
             plan: ChannelPlan::all_coded(4),
+            alphabet: AlphabetMaps::none(4),
         }
     }
 
@@ -222,11 +242,13 @@ mod tests {
         // Grayscale carried in RGBA, fully opaque: G and B alias R, alpha is constant.
         let data: Vec<u8> = (0..16u8).flat_map(|v| [v, v, v, 255]).collect();
         let plan = crate::channels::plan(&data, 4, &ChannelOptions::default());
+        let alphabet = AlphabetMaps::none(4);
         let h = Header {
             width: 4,
             height: 4,
             channels: 4,
             plan,
+            alphabet,
             ..sample()
         };
         let bytes = encoded(&h);
@@ -244,7 +266,7 @@ mod tests {
     fn field_offsets_match_the_spec() {
         let bytes = encoded(&sample());
         assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-        assert_eq!(bytes[4], 6); // version
+        assert_eq!(bytes[4], 7); // version
         assert_eq!(bytes[5], 0); // flags
         assert_eq!(&bytes[6..10], &640u32.to_le_bytes());
         assert_eq!(&bytes[10..14], &480u32.to_le_bytes());
@@ -269,14 +291,15 @@ mod tests {
             Header::parse(&bytes).unwrap_err(),
             BrpError::UnsupportedVersion {
                 found: 3,
-                expected: 6
+                expected: 7
             }
         );
     }
 
     #[test]
     fn rejects_reserved_flag_bits() {
-        for bit in 0..8 {
+        // Bit 0 is the alphabet map flag; the other seven are still reserved.
+        for bit in 1..8 {
             let mut bytes = encoded(&sample());
             bytes[5] = 1 << bit;
             assert!(matches!(
@@ -284,6 +307,26 @@ mod tests {
                 BrpError::ReservedFlagsSet(_)
             ));
         }
+    }
+
+    /// The map flag with no section behind it, and with nothing it could map.
+    #[test]
+    fn rejects_a_map_flag_it_cannot_honour() {
+        let mut bytes = encoded(&sample());
+        bytes[5] = FLAG_ALPHABET_MAPS;
+        assert_eq!(
+            Header::parse(&bytes).unwrap_err(),
+            BrpError::AlphabetTruncated
+        );
+
+        // A section of four `none` bytes says nothing and must not be written at all.
+        let mut bytes = encoded(&sample());
+        bytes[5] = FLAG_ALPHABET_MAPS;
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            Header::parse(&bytes).unwrap_err(),
+            BrpError::AlphabetSectionEmpty
+        );
     }
 
     #[test]

@@ -8,6 +8,12 @@ BRP (Block Range Packing) is a **lossless image codec and file format**, written
 
 Encoding has two stages.
 
+**Stage 0.5, alphabet compaction** (optional, `flags` bit 0). A channel that leaves gaps *inside
+its own range* has its samples replaced by their rank among the values it uses, so a text page's
+`{0, 255}` becomes `{0, 1}`. It runs **before** stage 1 on purpose — three channels using different
+pairs of values are not aliases, but their ranks are — and unmapping is the **last** step of a
+decode. Worth 1.1 points on synthetic content and nothing on photographs.
+
 **Stage 1, whole-image channel reduction.** Each channel is classified as *constant* (every sample
 identical, so the value moves to the header and the channel leaves the bitstream), an *alias* of an
 earlier channel (identical samples, so a grayscale image stored as RGB costs one channel), or
@@ -59,8 +65,10 @@ is worth another 1.6 and costs half the decode speed, so it is opt-in.
    bit packing elsewhere.
 7. **Coded channels are not a prefix.** An RGB image whose green aliases red codes channels 0 and
    2. Index by *slot* into `Header::coded_indices()`, never by raw channel number.
-8. **Decode order is fixed:** constants, blocks, unpredict, aliases. Unprediction reads neighbours
-   the same loop has already restored, so it must run in raster order, and aliases must follow it.
+8. **Decode order is fixed:** constants, blocks, unpredict, aliases, unmap. Unprediction reads
+   neighbours the same loop has already restored, so it must run in raster order; aliases follow
+   it; and the alphabet maps come last, because stage 1 works in rank space and an alias copies
+   its target's *ranks*.
 9. **Under either Rice coder a block's payload size is not computable from its header.** Rice
    codes are variable-length. Anything that used to skip a payload has to walk it instead — and
    under the context coder the walk must run the model too, because each code's length depends on
@@ -87,8 +95,9 @@ cargo run -p brp-cli --release -- info file.brp
 
 ## Current state and scope
 
-Format version 6: whole-image channel reduction, optional spatial prediction with the predictor
-chosen per row or per 8x8 block, block packing with a choice of three coders — fixed width,
+Format version 7: optional alphabet compaction, whole-image channel reduction, optional spatial
+prediction with the predictor chosen per row or per 8x8 block, block packing with a choice of three
+coders — fixed width,
 Golomb-Rice with a stored parameter, and Golomb-Rice with the parameter derived from a context of
 local gradients. Block size defaults to the whole image; it is already a parameter, so a block-size
 sweep works today. Prediction and coder both default to `Auto`, which measures rather than guesses.
@@ -109,7 +118,8 @@ inherent to stage 2, not a bug to report. Gains appear at 8x8/16x16, and stage 1
 degenerate images regardless of block size.
 
 Not in the format, and not to be added without measurements from `brp-lab`: entropy coding, other
-predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode.
+predictors, adaptive block size, inter-block delta, bit depths other than 8, parallel decode, and
+a palette over whole pixels.
 
 **Before claiming anything about compression, read `docs/EXPERIMENTS.md`.** Two results there
 overturn the obvious guesses: PNG's spatial prediction beats this algorithm on photographs by a

@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use brp_core::{
     analyze, decode_with, encode, Analysis, ChannelMode, ChannelOptions, CoderChoice,
-    DecodeOptions, EncodeOptions, FilterChoice,
+    DecodeOptions, EncodeOptions, FilterChoice, RemapChoice,
 };
 use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -41,6 +41,9 @@ struct EncodeArgs {
     /// Code every channel per block, even one whose samples are all identical.
     #[arg(long)]
     no_constant_channels: bool,
+    /// Keep every channel's alphabet as it is, even one that leaves gaps inside its own range.
+    #[arg(long)]
+    no_alphabet_maps: bool,
     /// Code every channel per block, even one identical to an earlier channel.
     #[arg(long)]
     no_channel_aliasing: bool,
@@ -166,6 +169,11 @@ fn cmd_encode(args: &EncodeArgs) -> Result<()> {
         },
         filter: args.filter.into(),
         coder: args.coder.into(),
+        remap: if args.no_alphabet_maps {
+            RemapChoice::Off
+        } else {
+            RemapChoice::Gaps
+        },
     };
     let bytes = encode(&loaded.image, &opts).map_err(|e| anyhow::anyhow!(e))?;
     std::fs::write(&args.output, &bytes)
@@ -235,6 +243,21 @@ fn print_info(a: &Analysis, list_blocks: usize) {
             brp_core::FILTER_MODE_ADAPTIVE => "adaptive per row, zigzagged residuals",
             brp_core::FILTER_MODE_BLOCK => "adaptive per 8x8 block, zigzagged residuals",
             _ => "off",
+        }
+    );
+    let mapped: Vec<String> = (0..usize::from(h.channels))
+        .filter_map(|c| {
+            h.alphabet
+                .map(c)
+                .map(|m| format!("channel {c} keeps {} of 256 values", m.alphabet_size()))
+        })
+        .collect();
+    println!(
+        "  alphabet       {}",
+        if mapped.is_empty() {
+            "unchanged".to_string()
+        } else {
+            mapped.join(", ")
         }
     );
     println!(

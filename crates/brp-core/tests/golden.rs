@@ -10,8 +10,7 @@
 //! fixtures depend on which way that comparison happened to fall.
 
 use brp_core::{
-    decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage,
-};
+    decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage, RemapChoice};
 
 /// No prediction, fixed-width block packing: the plainest encoding the format can produce.
 fn plain(block: Option<(u32, u32)>) -> EncodeOptions {
@@ -20,6 +19,7 @@ fn plain(block: Option<(u32, u32)>) -> EncodeOptions {
         channels: ChannelOptions::default(),
         filter: FilterChoice::Off,
         coder: CoderChoice::Fixed,
+        remap: RemapChoice::Off,
     }
 }
 
@@ -54,7 +54,7 @@ fn rgba_with_constant_channels() {
     let expected: Vec<u8> = vec![
         // -- header, 29 bytes --
         b'B', b'R', b'P', 0x1A,
-        6,                      // version
+        7,                      // version
         0,                      // flags
         2, 0, 0, 0,             // width
         2, 0, 0, 0,             // height
@@ -89,7 +89,7 @@ fn constant_grayscale_is_header_only() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -133,7 +133,7 @@ fn grayscale_carried_in_rgb() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -184,7 +184,7 @@ fn prediction_and_zigzag() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -239,7 +239,7 @@ fn rice_coded_block() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -256,6 +256,7 @@ fn rice_coded_block() {
 
     let opts = EncodeOptions {
         coder: CoderChoice::Rice,
+        remap: RemapChoice::Off,
         ..plain(None)
     };
     let actual = encode(&src, &opts).unwrap();
@@ -270,6 +271,7 @@ fn rice_coded_block() {
     assert_eq!(encode(&src, &plain(None)).unwrap().len(), 30);
     let auto = EncodeOptions {
         coder: CoderChoice::Auto,
+        remap: RemapChoice::Off,
         ..plain(None)
     };
     assert_eq!(encode(&src, &auto).unwrap().len(), 30);
@@ -291,6 +293,7 @@ fn rice_constant_block_has_no_payload() {
     let opts = EncodeOptions {
         block_size: Some((2, 2)),
         coder: CoderChoice::Rice,
+        remap: RemapChoice::Off,
         ..plain(None)
     };
     let bytes = encode(&src, &opts).unwrap();
@@ -331,7 +334,7 @@ fn context_coded_block() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         2, 0, 0, 0,
         2, 0, 0, 0,
@@ -348,6 +351,7 @@ fn context_coded_block() {
 
     let opts = EncodeOptions {
         coder: CoderChoice::Context,
+        remap: RemapChoice::Off,
         ..plain(None)
     };
     let actual = encode(&src, &opts).unwrap();
@@ -363,6 +367,7 @@ expected: {expected:02X?}"
     // `Auto` must not reach for this coder, however the sizes fall.
     let auto = EncodeOptions {
         coder: CoderChoice::Auto,
+        remap: RemapChoice::Off,
         ..plain(None)
     };
     assert_eq!(
@@ -396,7 +401,7 @@ fn context_coded_escape_and_sign_folding() {
     #[rustfmt::skip]
     let expected: Vec<u8> = vec![
         b'B', b'R', b'P', 0x1A,
-        6,
+        7,
         0,
         4, 0, 0, 0,             // width
         1, 0, 0, 0,             // height
@@ -413,6 +418,7 @@ fn context_coded_escape_and_sign_folding() {
 
     let opts = EncodeOptions {
         coder: CoderChoice::Context,
+        remap: RemapChoice::Off,
         ..plain(Some((2, 1)))
     };
     let actual = encode(&src, &opts).unwrap();
@@ -434,6 +440,73 @@ expected: {expected:02X?}"
         a.width_code_histogram[0][2], 2,
         "both coded samples derived k = 2"
     );
+}
+
+/// An alphabet map: a channel that skips a value inside its own range (`FORMAT.md` 3.4).
+///
+/// 16x8 grayscale cycling through 0, 1, 2, 4. Value 3 is never used, so the channel's range is
+/// 0..=4 with one interior gap, and the ranks are 0, 1, 2, 3.
+///
+/// The map costs four bytes: form 1 (bitmap), `lo` 0, `hi` 4, then one bit for each value strictly
+/// between them — 1 for 1, 1 for 2, 0 for 3 — as `110` padded to `1100 0000`.
+///
+/// Stage 2 then packs ranks instead of samples: min 0, max 3, span 3, width code 2 rather than the
+/// 3 the raw values need.
+///
+/// Body bits, 268 of them plus 4 of padding:
+///   00000000 0010              base 0, width code 2
+///   00 01 10 11 x32            the ranks, in order
+///
+/// The pattern is periodic over eight bits, and the twelve bits of block header shift it by four,
+/// which is why every full byte after the first two reads `1011 0001`.
+#[test]
+fn alphabet_map_of_a_channel_with_a_gap() {
+    let data: Vec<u8> = (0..128).map(|i| [0u8, 1, 2, 4][i % 4]).collect();
+    let src = RawImage::new(16, 8, 1, data).unwrap();
+
+    #[rustfmt::skip]
+    let mut expected: Vec<u8> = vec![
+        // -- header, 27 bytes --
+        b'B', b'R', b'P', 0x1A,
+        7,                      // version
+        0x01,                   // flags: an alphabet map section follows
+        16, 0, 0, 0,            // width
+        8, 0, 0, 0,             // height
+        1,                      // channels
+        8,                      // bit depth
+        16, 0, 0, 0,            // block width
+        8, 0, 0, 0,             // block height
+        0,                      // filter mode: none
+        0,                      // block coder: fixed width
+        0x00,                   // channel modes: coded
+        // -- alphabet map, 4 bytes --
+        1,                      // form: bitmap
+        0,                      // lo
+        4,                      // hi
+        0xC0,                   // 1 and 2 are used, 3 is not
+        // -- body, 34 bytes --
+        0x00,                   // base 0
+        0x21,                   // width code 2, then the first two ranks
+    ];
+    expected.extend(std::iter::repeat_n(0xB1, 31));
+    expected.push(0xB0);
+
+    let opts = EncodeOptions {
+        remap: RemapChoice::Gaps,
+        ..plain(None)
+    };
+    let actual = encode(&src, &opts).unwrap();
+    assert_eq!(
+        actual, expected,
+        "\n  actual: {actual:02X?}\nexpected: {expected:02X?}"
+    );
+    assert_eq!(decode(&expected).unwrap(), src);
+
+    // And the claim the map is there to make: without it every sample costs a third more.
+    let plain_bytes = encode(&src, &plain(None)).unwrap();
+    assert_eq!(plain_bytes.len(), 77);
+    assert_eq!(actual.len(), 65);
+    assert_eq!(plain_bytes[5], 0, "the control carries no map section");
 }
 
 /// Filter mode 2: the predictor chosen per 8x8 block instead of per row (`FORMAT.md` 5.2).
@@ -463,7 +536,7 @@ fn per_block_prediction() {
     let expected: Vec<u8> = vec![
         // -- header, 27 bytes --
         b'B', b'R', b'P', 0x1A,
-        6,                      // version
+        7,                      // version
         0,                      // flags
         9, 0, 0, 0,             // width
         1, 0, 0, 0,             // height
@@ -512,7 +585,7 @@ fn header_field_offsets() {
     let bytes = encode(&src, &plain(Some((2, 4)))).unwrap();
 
     assert_eq!(&bytes[0..4], &[b'B', b'R', b'P', 0x1A]);
-    assert_eq!(bytes[4], 6);
+    assert_eq!(bytes[4], 7);
     assert_eq!(bytes[5], 0);
     assert_eq!(&bytes[6..10], &5u32.to_le_bytes());
     assert_eq!(&bytes[10..14], &1u32.to_le_bytes());
