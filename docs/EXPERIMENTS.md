@@ -657,6 +657,101 @@ measurements.
 MED and GAP stay measured and unadopted. They cost decode speed in the same place the context coder
 does, and speed is this codec's argument.
 
+### 15. Every block size, and what is left for a quadtree
+
+Two tools, one question. `block-sweep` measures every block size on every image — size, encode
+rate, decode rate — for the whole image, for the image halved repeatedly, and for the fixed squares
+the earlier findings argue over. `quadtree-rice` then asks what adaptive splitting could add on top
+of the best of them, exactly rather than by implementing one.
+
+#### The uniform sweep
+
+Averaged two ways, because they answer different questions and can disagree: the **mean** treats
+every image alike, which is what "what should the default be" asks; the **corpus** total weights by
+bytes, which is what "how big is the corpus" asks. On this corpus the eight photographs are the
+same size, so their two columns coincide.
+
+Default settings (`filter Auto`, `coder Auto`):
+
+| Block | Photographs | Synthetic, mean | Synthetic, corpus | Everything, mean | Decode, photographs |
+|---|---:|---:|---:|---:|---:|
+| whole image | 61.89% | 29.23% | 26.37% | 39.68% | 69 MiB/s |
+| halved (/2) | 61.14% | 29.14% | 26.25% | 39.38% | 69 |
+| /4 | 60.20% | 29.11% | 26.21% | 39.06% | 67 |
+| /8 | 59.57% | 29.02% | 26.15% | 38.79% | 67 |
+| /16 | 58.93% | 28.78% | 25.93% | 38.42% | 65 |
+| /32 | **58.43%** | 29.34% | 26.52% | 38.64% | 64 |
+| 64x64 | 59.32% | 29.11% | 26.21% | 38.78% | 66 |
+| 32x32 | 58.72% | 29.02% | 26.15% | 38.52% | 65 |
+| **16x16** | **58.38%** | **28.78%** | **25.93%** | **38.25%** | 65 |
+| 8x8 | 59.22% | 29.34% | 26.52% | 38.90% | 61 |
+
+**16x16 wins on both corpora, on both ways of averaging, and by every route into the table.** For a
+768x512 image `/32` *is* 24x16, which is why those rows agree to a tenth of a point; the halving
+family exists to show that the optimum is a size, not a fraction of the image.
+
+The curve is a shallow bowl, and that is the result worth keeping. Between 32x32 and 8x8 the
+photographs move 0.84 points, and from the whole image down to the bottom only 3.5. A block size
+chosen anywhere in that range is within a point of the best one.
+
+Decode falls monotonically as blocks shrink — 69 MiB/s at the whole image, 61 at 8x8 — but the
+per-round spread is 9-18%, so no single pair in that column is a result. What is a result is that
+the ordering repeats across eleven rows and two corpora, and that the total swing is about 12%.
+Encode does not move at all: 12-13 MiB/s on photographs at every size, because `Auto`'s three
+prediction trials dominate it.
+
+Under the **context coder** the picture changes completely:
+
+| Block | Photographs | Synthetic, mean | Synthetic, corpus |
+|---|---:|---:|---:|
+| whole image | 57.23% | 30.03% | 26.97% |
+| /16 | **56.99%** | 29.33% | 26.25% |
+| /32 | 57.02% | 28.75% | 25.79% |
+| 32x32 | **56.99%** | 29.89% | 26.76% |
+| 16x16 | 57.05% | 29.33% | 26.25% |
+| 8x8 | 57.24% | **28.75%** | **25.79%** |
+
+Photographs span **0.25 points** across every block size from the whole image to 8x8. The coder
+that derives its parameter per sample does not care how the image is divided, which is exactly what
+findings 11 and 13 predicted and is now measured end to end. The synthetic corpus reverses its
+preference — 8x8 is the best there and the worst under the stored-parameter coder — because the
+per-block header it was paying for is one bit rather than twelve.
+
+#### What a quadtree could still add
+
+`quadtree-rice` costs every node of the pyramid in the bits version 6 would actually spend under
+`block_coder` 1 — a base, a mode and Golomb-Rice at the best parameter, per coded channel — and
+takes, bottom up, the cheaper of coding a node whole or coding its four children plus one flag bit.
+Nothing is heuristic, so this is the **ceiling** for adaptive splitting at an 8x8 leaf: no better
+quadtree exists.
+
+Against uniform grids costed the same way (file header and prediction codes excluded from every
+column alike):
+
+| | 8x8 | 16x16 | 32x32 | 64x64 | quadtree | gain |
+|---|---:|---:|---:|---:|---:|---:|
+| Photographs (8) | 59.02% | 58.18% | 58.52% | 59.12% | **57.72%** | −0.46 |
+| Synthetic (15) | 31.45% | 31.13% | 31.53% | 31.53% | **29.96%** | −1.17 |
+
+**Half a point on photographs, and it is the ceiling rather than a design.** Finding 4 measured 4
+points for the same idea under fixed-width packing; Rice has taken seven eighths of it, exactly as
+that finding predicted when it said both attack the same thing.
+
+Where the remaining gain is concentrated is the useful part. The largest wins are mixed synthetic
+content — `screenshot-like` −0.86, `text-page` −0.68, `text-page-gray` −0.64 — where regions
+genuinely differ in kind. Smooth synthetic images gain 0.03, because the tree keeps the whole image
+as one leaf. Photographs sit between at 0.35 to 0.70.
+
+The leaves say why a fixed grid does nearly as well. On the photographs the tree stops all over the
+pyramid rather than at one level — for `kodim01`, 12.6% of the samples end in 8x8 leaves, 37.2% in
+16x16, 29.4% in 32x32, 16.7% in 64x64 and 4.2% in 128x128 — so no single uniform size is right for
+more than about a third of the image, and yet choosing 16x16 for all of it costs only 0.46 points.
+The distribution is broad and the cost surface around it is flat.
+
+Under `block_coder` 2 the ceiling was not computed — the model's state crosses block boundaries, so
+a node cannot be priced in isolation — but the uniform sweep above bounds the interest: 0.25 points
+separate every block size on the photographs, and adaptation is competing for that.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007), the
@@ -710,11 +805,13 @@ measured size rather than assumed.
    24 and 80 against 9 and 96.
 4. ~~Context modelling for the Rice parameter.~~ Done, version 5, as an opt-in coder rather than
    the default: 1.6 points against the best fixed block size, at half the decode speed (finding 13).
-5. **Adaptive block size** — the remaining item, and weaker than it was. Finding 11 predicted context modelling would take
-   most of its force, and finding 13 confirms it: the header cost that made small blocks expensive
-   is gone under coder 2, and the payload penalty that made large blocks expensive *was* the
-   per-block parameter. Its cost model still assumes fixed-width packing and still has to be
-   rewritten before the 4-point figure means anything.
+5. ~~Adaptive block size.~~ Measured, finding 15, and it is now a *ceiling* rather than a
+   proposal: an exact quadtree under the Rice coder gains 0.46 points on photographs and 1.17 on
+   the synthetic corpus over the best uniform grid, against the 4 points finding 4 measured under
+   fixed-width packing. Under the context coder every block size lands within 0.25 points of every
+   other, so there is even less to win. **Not worth building** at that price; the same effort has
+   returned 1.3-1.5 points twice, in versions 5 and 6.
+
 6. ~~Better predictors.~~ Done, version 6, and the answer was not the one the item was written
    around. LOCO-I's and CALIC's predictors are worth about half a point; choosing among PNG's own
    five per 8x8 block instead of per row is worth one and a half and costs nothing measurable to

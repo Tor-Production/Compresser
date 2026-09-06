@@ -47,34 +47,30 @@ worth half a point, the unit of choice is worth three times that, and finding 14
 
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
 Deflate, PNG-style filters, predictor variants including LOCO-I's and CALIC's, and the
-`residual-shape`, `ctx-sweep` and `pred-sweep` tools that measure what the format actually emits.
+`residual-shape`, `ctx-sweep`, `pred-sweep`, `block-sweep` and `quadtree-rice` tools that measure
+what the format actually emits.
 Plus a real photograph corpus, because the synthetic one flatters this algorithm badly enough to
 have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Adaptive block size
+### 1. Deciding what the documented configuration is  ← next, and now decided on the evidence
 
-`quadtree` beat a fixed 8x8 grid by 4 points on photographs with an exact cost model. That figure is
-now stale three times over: the model assumed fixed-width packing and has to be rewritten around
-Rice's cost; the fixed grid it has to beat is no longer 8x8, since a 16x16 grid is 0.8 points better
-(finding 11); and under the context coder the per-block header it was trading against is one bit
-rather than twelve, which is most of what made small blocks expensive. Finding 13 confirms the
-prediction finding 11 made — adaptation across block sizes has lost most of its force. Re-measure
-before implementing.
+Finding 15 swept every block size on every image — the whole image, the image halved repeatedly,
+and fixed squares — and the answer is no longer split:
 
-### 2. Deciding what the documented configuration is
+**16x16 wins under the default coder on both corpora and under both ways of averaging.** 58.38% of
+raw on the photographs against 8x8's 59.22% and the whole image's 61.89%; 25.93% on the synthetic
+corpus against 8x8's 26.52%. The curve is a shallow bowl — 0.84 points separate 32x32 from 8x8 — so
+this is a choice worth making once and not worth agonising over.
 
-Three block sizes now have a claim: the shipped default is the whole image, every table in
-`EXPERIMENTS.md` quotes 8x8, 16x16 is 0.8 points better under the stored-parameter coders
-(finding 11), and 32x32 is best under the context coder (finding 13). Version 6 leaves that
-untouched — the prediction grid is its own 8x8 and does not borrow the block size — so the decision
-is exactly as open as it was, and the figures it would restate have all moved. Nothing was changed on the
-strength of any of that, because moving the documented grid restates every figure on the page at
-once.
+Under the context coder every block size lands within 0.25 points on the photographs, and the
+synthetic corpus prefers 8x8 there. That coder is opt-in, so it does not decide the default.
 
-That is a bookkeeping decision rather than a codec one, and it should be taken deliberately, in one
-commit, with the whole page re-measured — not drifted into.
+What remains is bookkeeping, and it is why this has not been done yet: the shipped default is still
+the whole image, every table in `EXPERIMENTS.md` quotes 8x8, and moving the documented grid
+restates every figure on the page at once. It should be one commit, with the whole page re-measured
+and `EncodeOptions::block_size`'s default changed with it — not drifted into.
 
 ## Later
 
@@ -93,6 +89,15 @@ commit, with the whole page re-measured — not drifted into.
 
 ## Not planned
 
+- **Adaptive block size (a quadtree).** Measured as a *ceiling* rather than a proposal in finding
+  15: an exact bottom-up quadtree, costed in the bits the format would really spend under the Rice
+  coder, gains **0.46 points on photographs** and 1.17 on the synthetic corpus over the best
+  uniform grid. Finding 4 measured 4 points for the same idea under fixed-width packing; Rice has
+  taken seven eighths of it, and the context coder narrows every block size to within 0.25 points
+  of every other. What remains is concentrated in mixed synthetic content — screenshots and text
+  pages, 0.6 to 0.9 points — and buying it costs a variable-size block loop in the decoder and a
+  pyramid of cost evaluations in the encoder. The same effort has returned 1.3-1.5 points twice, in
+  versions 5 and 6.
 - **LZW.** Measured at 80.9% against Deflate's 56.0% on the same bytes. Dictionary matching without
   a good entropy stage is not competitive, and Deflate already provides both.
 - **Patched frame of reference.** The textbook fix for BRP's exact weakness, and half our blocks

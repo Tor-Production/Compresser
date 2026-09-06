@@ -114,6 +114,18 @@ fn rice_block_cost(values: &[u32], k: u32) -> u64 {
 }
 
 /// The parameter minimising the block's cost. Exhaustive over 0..=8, which is nine cheap passes.
+/// Payload bits Rice spends on one block-channel at the parameter an encoder would choose.
+///
+/// Exposed for the tools that price a block without encoding one — `quadtree-rice` costs every
+/// node of a pyramid this way, which is only meaningful if it is the *same* arithmetic the format
+/// uses. It excludes the base and mode fields, which the caller adds.
+pub fn rice_payload_bits(values: &[u32]) -> u64 {
+    if values.iter().all(|&v| v == 0) {
+        return 0;
+    }
+    rice_block_cost(values, best_rice_k(values))
+}
+
 fn best_rice_k(values: &[u32]) -> u32 {
     (0..=BIT_DEPTH)
         .min_by_key(|&k| rice_block_cost(values, k))
