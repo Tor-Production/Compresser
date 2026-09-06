@@ -522,6 +522,126 @@ another codec, the quantity it is defined over has to be borrowed with it. A par
 step off is still a *valid* parameter, so nothing fails, the round trip stays lossless, and the only
 symptom is a number that is slightly too large.
 
+### 14. The unit of choice matters more than the predictor
+
+The roadmap put two candidates behind this item: the gradient-adjusted predictor from
+LOCO-I/JPEG-LS, and choosing the predictor per block rather than per row. `pred-sweep` measured
+both, and a third for completeness — MED and GAP offered as extra *kinds* in the per-row menu
+rather than used alone.
+
+Every table below quotes `png5/row` first. That variant reproduces `brp_core::apply_prediction`
+bit for bit — a test asserts it — and it lands on the format's own figure to the decimal under
+both coders, so it is the control and everything else is read against it.
+
+**Sizes on the photographs**, each coder at the block size its own finding settled on:
+
+| Predictor | Rice, 16x16 | Context, 32x32 | 130 MiB photograph, context |
+|---|---:|---:|---:|
+| `png5/row` — the format today (control) | 59.88% | 58.28% | 31.60% |
+| `fixed:paeth` — one PNG kind everywhere | 60.46% | 58.85% | — |
+| `fixed:med` — LOCO-I's predictor, alone | 59.59% | 58.12% | — |
+| `fixed:gap` — CALIC's predictor, alone | 59.26% | 57.71% | 33.12% |
+| `png5/8x8` — **the same five, chosen per block** | 58.38% | 56.99% | 31.31% |
+| `png6/8x8` — those five plus MED | 58.18% | 56.86% | 30.92% |
+| `png7/8x8` — plus MED and GAP | **57.84%** | **56.54%** | **30.89%** |
+| `filter+deflate`, for scale | 57.50% | 57.50% | 35.25% |
+
+**A better predictor is worth about half a point; a smaller unit of choice is worth one and a
+half.** Nothing in the menu changed for the `png5/8x8` row — the same five PNG predictors, chosen
+by the same sum of absolute residuals — and it takes 1.50 points off the Rice coder and 1.29 off
+the context coder. Adding MED and GAP to the menu takes another 0.45.
+
+Under the context coder that crosses a line the roadmap had written off: at 56.99% the codec is
+**ahead of `filter+deflate`'s 57.50% on the small photographs**, which "Beating PNG on the small
+photographs by ratio alone" had listed as not planned. It cost one stage's worth of adaptivity
+rather than a new stage.
+
+How fine the unit should be, under the context coder, on the photographs: 32x32 gives 57.61%,
+16x16 57.27%, 8x8 56.99%, 4x4 56.94%. The curve flattens, and 4x4 costs 0.26 points on the
+synthetic corpus that 8x8 does not, where four times as many three-bit codes land on images that
+are already small. 8x8 is the knee.
+
+#### GAP alone is a trap
+
+`fixed:gap` is the best of the fixed rules on the 768x512 crops — 0.57 points better than the
+control under the context coder, with no side information at all. On the 45-megapixel photograph
+the same predictor is **1.52 points worse** than the control, and worse than every other row
+measured. A fixed rule that adapts aggressively to local gradients is tuned to a scale, and the
+crops are not the scale real photographs have.
+
+Inside a menu it does no harm, because the encoder declines it where it loses. What the seven-kind
+menu actually picks, in percent of the samples covered:
+
+| Corpus, scope | none | sub | up | avg | paeth | MED | GAP |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Photographs, per row | 0.1 | 0.9 | 0.1 | 13.9 | 0.7 | 18.4 | 65.9 |
+| Photographs, per 16x16 | 0.0 | 9.1 | 4.0 | 35.0 | 1.7 | 14.3 | 36.0 |
+| 130 MiB photograph, per row | 0.0 | 0.0 | 0.0 | 0.1 | 0.0 | 60.5 | 39.4 |
+| Synthetic, per row | 3.4 | 4.2 | 50.3 | 2.3 | 5.8 | 3.8 | 30.2 |
+
+Two things fall out of that table. The scale reverses which of the two wins — GAP takes two thirds
+of the crops and MED takes half to two thirds of the large photograph — so neither is *the* better
+predictor, which is the argument for offering both rather than replacing the five. And the finer
+the unit, the more work PNG's own kinds do: at 16x16 the average predictor takes 35% of the
+samples it never sees at row scale.
+
+#### What it costs
+
+Photographs, best of three interleaved rounds, spread beside it:
+
+| Configuration | Encode | Decode |
+|---|---:|---:|
+| `rice[16x16] + png5/row` (control) | 20 MiB/s | 65 MiB/s |
+| `rice[16x16] + png5/8x8` | 19 | **64** |
+| `rice[16x16] + png6/8x8` | 14 | 58 |
+| `rice[16x16] + png7/8x8` | 10 | 48 |
+| `rice[16x16] + fixed:gap` | 26 | 35 |
+| `ctx[resid,32x32] + png5/row` (control) | 17 | 33 |
+| `ctx[resid,32x32] + png5/8x8` | 16 | **33** |
+| `ctx[resid,32x32] + png7/8x8` | 9 | 28 |
+
+**A per-block choice among the five costs nothing measurable to decode.** It is the same five
+predictors over the same samples; only the lookup that says which one changes, and that is hoisted
+out of the sample loop. The synthetic corpus, whose spreads are tighter, shows the small residue:
+109 MiB/s against 102 under the Rice coder.
+
+MED and GAP are the expensive half — 65 to 48 MiB/s for the full menu — because a decoder that
+offers them has to be able to *run* them, and GAP reads seven neighbours and branches on two
+gradients where `up` reads one. That is the trade this finding leaves open: 0.45 points for a
+quarter of the decode rate under the Rice coder.
+
+The encode column compares prototypes only. `brp-core` costs all five predictors for a row in one
+pass over it, while `predictors::apply` runs one pass per candidate kind, so the control row here
+is already slower than the shipped encoder and the menu rows are penalised in proportion to how
+many kinds they offer. Nothing in the encode column measures how expensive a *format* would be.
+
+#### The first timing table priced the lookup, not the idea
+
+It said `png5/8x8` decoded at 57 MiB/s against the control's 63, and 90 against 119 on the
+synthetic corpus — a 10-24% cost for choosing per block, which would have changed the conclusion.
+
+The cause was in the prototype, not the design. `undo_in_place` looked the kind up per sample,
+which put two integer divisions in the decoder's innermost loop. Hoisting the lookup to once per
+run of constant kind within a row — which is what any real implementation would do — moved the
+photographs to 64 against 65 and the synthetic corpus to 102 against 109. The output did not
+change by one bit; the control test guarantees that.
+
+This is finding 12's lesson in a second guise: a measurement that prices the scaffolding rather
+than the thing is not evidence, and it is easiest to believe when it confirms what you expected —
+of course choosing per block costs something.
+
+#### What this means for the format
+
+Adopting the per-block choice is a version bump, and it needs one decision that this finding does
+not make: prediction currently signals one kind per *row*, and a per-block choice needs a grid.
+Tying that grid to stage 2's block size would be the obvious move and is wrong — the shipped
+default block size is the whole image, which would turn a per-row choice into a per-image one — so
+the prediction grid has to stand on its own. At 8x8 it needs no header field at all, only a filter
+mode that says the codes are laid out per block.
+
+MED and GAP are a separate decision, and a harder one: they cost decode speed in the same place
+the context coder does, and speed is this codec's argument.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007), the
@@ -564,8 +684,12 @@ nothing in the move either.
    is gone under coder 2, and the payload penalty that made large blocks expensive *was* the
    per-block parameter. Its cost model still assumes fixed-width packing and still has to be
    rewritten before the 4-point figure means anything.
-6. **Better predictors.** Now the largest untried item, and the context machinery version 5 added
-   is most of what LOCO-I's gradient-adjusted predictor needs.
+6. **Better predictors.** Measured, finding 14, and the answer was not the one the item was
+   written around. LOCO-I's and CALIC's predictors are worth about half a point; choosing among
+   PNG's own five per 8x8 block instead of per row is worth one and a half, and costs nothing
+   measurable to decode. **Adopt the per-block choice** — a version bump, a filter mode, and a
+   prediction grid that does not borrow stage 2's. MED and GAP stay measured and unadopted until
+   somebody wants 0.45 points at a quarter of the decode rate.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
 per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage

@@ -18,6 +18,7 @@ pub mod filters;
 pub mod huffman;
 pub mod lzw;
 pub mod predict;
+pub mod predictors;
 pub mod quadtree;
 
 /// One compression pipeline, end to end.
@@ -331,13 +332,17 @@ impl Codec for Predicted {
 pub struct Packed {
     pub coder: blockpack::BlockCoder,
     pub block: u32,
-    pub predict: bool,
+    pub predictor: Option<predictors::Variant>,
     pub entropy: Entropy,
 }
 
 impl Codec for Packed {
     fn name(&self) -> String {
-        let p = if self.predict { ",pred" } else { "" };
+        let p = match self.predictor {
+            None => String::new(),
+            Some(v) if v == predictors::Variant::shipped() => ",pred".to_string(),
+            Some(v) => format!(",{}", v.name()),
+        };
         format!(
             "{}[{}x{}{p}]{}",
             self.coder.name(),
@@ -351,7 +356,7 @@ impl Codec for Packed {
         let opts = blockpack::Options {
             coder: self.coder,
             block: self.block,
-            predict: self.predict,
+            predictor: self.predictor,
         };
         self.entropy.pack(&blockpack::encode(img, &opts))
     }
@@ -445,7 +450,7 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
         v.push(Box::new(Packed {
             coder,
             block: 8,
-            predict: true,
+            predictor: Some(predictors::Variant::shipped()),
             entropy: Entropy::None,
         }));
     }
@@ -453,14 +458,14 @@ pub fn all_codecs() -> Vec<Box<dyn Codec>> {
     v.push(Box::new(Packed {
         coder: BlockCoder::Rice,
         block: 8,
-        predict: true,
+        predictor: Some(predictors::Variant::shipped()),
         entropy: Entropy::Deflate,
     }));
     // And Rice without prediction, to separate the two contributions.
     v.push(Box::new(Packed {
         coder: BlockCoder::Rice,
         block: 8,
-        predict: false,
+        predictor: None,
         entropy: Entropy::None,
     }));
 

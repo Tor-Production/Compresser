@@ -24,14 +24,14 @@
 //! Nothing here is part of the format. See `docs/FORMAT.md` for what a `.brp` file is.
 
 use anyhow::{bail, Result};
+use crate::predictors::{self, Variant};
 use brp_core::{
-    apply_prediction, plan_channels, undo_prediction, unzigzag, BitReader, BitWriter, BlockGrid,
-    BlockRect, ChannelMode, ChannelOptions, ChannelPlan, CodedIndices, RawImage, FILTER_KINDS,
+    plan_channels, unzigzag, BitReader, BitWriter, BlockGrid,
+    BlockRect, ChannelMode, ChannelOptions, ChannelPlan, CodedIndices, RawImage,
     MAX_CHANNELS,
 };
 
 const BIT_DEPTH: u32 = 8;
-const FILTER_KIND_BITS: u32 = 3;
 
 /// Unary prefix cap, exactly as `brp-core` uses it: beyond this the value goes out verbatim.
 const RICE_ESCAPE: u32 = 8;
@@ -371,7 +371,9 @@ pub struct Options {
     pub thresholds: Thresholds,
     /// Block side in pixels. `None` is one block covering the whole image.
     pub block: Option<u32>,
-    pub predict: bool,
+    /// Which predictor produces the residuals the model then codes, or `None` for none at all.
+    /// Roadmap item 1 lives here: everything except [`Variant::shipped`] is a candidate.
+    pub predictor: Option<Variant>,
     /// Keep the per-block minimum as a base, the way stage 2 does today.
     pub base: bool,
     /// One bit per block-channel saying "every residual here is zero" — what mode 0 buys today.
@@ -388,7 +390,7 @@ impl Default for Options {
             source: ContextSource::Residual,
             thresholds: Thresholds::default(),
             block: Some(8),
-            predict: true,
+            predictor: Some(Variant::shipped()),
             base: true,
             escape: true,
             per_channel: true,
@@ -405,8 +407,10 @@ impl Options {
         };
         let t = self.thresholds;
         let mut flags = String::new();
-        if self.predict {
-            flags.push_str(",pred");
+        match self.predictor {
+            None => {}
+            Some(v) if v == Variant::shipped() => flags.push_str(",pred"),
+            Some(v) => flags.push_str(&format!(",{}", v.name())),
         }
         if !self.base {
             flags.push_str(",nobase");
@@ -511,7 +515,7 @@ struct Body<'a> {
     coded: &'a CodedIndices,
     kinds: &'a [u8],
     options: Options,
-    predict: bool,
+    predictor: Option<Variant>,
     height: u32,
 }
 
@@ -534,7 +538,8 @@ impl Body<'_> {
         );
         // LOCO-I contexts read reconstructed samples, so prediction has to be undone here rather
         // than in a pass afterwards. This is the decode-order change the source choice costs.
-        let inline_unpredict = self.predict && self.options.source == ContextSource::Sample;
+        let inline_unpredict =
+            self.predictor.is_some() && self.options.source == ContextSource::Sample;
 
         let grid = BlockGrid::new(self.width, self.height, self.block_w, self.block_h);
         let mut bases = [0u8; MAX_CHANNELS];
@@ -636,14 +641,22 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
     let stride = usize::from(img.channels());
     let plan = plan_channels(img.data(), img.channels(), &ChannelOptions::default());
     let coded = plan.coded_indices();
-    let predict = opts.predict && !coded.is_empty();
+    let predictor = if coded.is_empty() { None } else { opts.predictor };
+    assert!(
+        opts.source != ContextSource::Sample
+            || predictor.is_none()
+            || predictor == Some(Variant::shipped()),
+        "sample-domain contexts unpredict inside the block loop, where a predictor reading above-right would read a block that has not been decoded; see ADR 0009"
+    );
 
-    // Exactly the format's own prediction, so this measures the parameter choice and nothing else.
-    let (kinds, residuals) = if predict {
-        let (k, r) = apply_prediction(img.data(), img.width(), img.height(), stride, &coded);
-        (k, Some(r))
-    } else {
-        (Vec::new(), None)
+    // With the shipped variant this is the format's own prediction, bit for bit, so a row that
+    // changes only the model measures the model and nothing else.
+    let (kinds, residuals) = match predictor {
+        Some(v) => {
+            let (k, r) = predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
+            (k, Some(r))
+        }
+        None => (Vec::new(), None),
     };
     let plane: &[u8] = residuals.as_deref().unwrap_or(img.data());
     let (block_w, block_h) = match opts.block {
@@ -655,9 +668,9 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
     out.extend_from_slice(&img.width().to_le_bytes());
     out.extend_from_slice(&img.height().to_le_bytes());
     out.push(img.channels());
+    out.extend_from_slice(&predictors::code(predictor));
     out.push(
-        u8::from(predict)
-            | u8::from(opts.base) << 1
+        u8::from(opts.base) << 1
             | u8::from(opts.escape) << 2
             | u8::from(opts.per_channel) << 3,
     );
@@ -676,7 +689,7 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
 
     let mut w = BitWriter::with_capacity(img.data().len());
     for &kind in &kinds {
-        w.write(u32::from(kind), FILTER_KIND_BITS);
+        w.write(u32::from(kind), predictors::KIND_BITS);
     }
 
     // LOCO-I contexts are gradients between samples; the encoder has those directly, and they are
@@ -771,7 +784,7 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
 // Decode
 // ---------------------------------------------------------------------------------------------
 
-const STREAM_HEADER: usize = 23;
+const STREAM_HEADER: usize = 26;
 
 struct Parsed {
     width: u32,
@@ -779,7 +792,7 @@ struct Parsed {
     channels: u8,
     block_w: u32,
     block_h: u32,
-    predict: bool,
+    predictor: Option<Variant>,
     options: Options,
     plan: ChannelPlan,
     body: usize,
@@ -792,16 +805,17 @@ fn parse(bytes: &[u8]) -> Result<Parsed> {
     let width = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let height = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let channels = bytes[8];
-    let flags = bytes[9];
-    let source = ContextSource::from_code(bytes[10])?;
+    let predictor = predictors::from_code([bytes[9], bytes[10], bytes[11]])?;
+    let flags = bytes[12];
+    let source = ContextSource::from_code(bytes[13])?;
     let thresholds = Thresholds {
-        t1: bytes[11],
-        t2: bytes[12],
-        t3: bytes[13],
+        t1: bytes[14],
+        t2: bytes[15],
+        t3: bytes[16],
     };
-    let reset = bytes[14];
-    let block_w = u32::from_le_bytes([bytes[15], bytes[16], bytes[17], bytes[18]]);
-    let block_h = u32::from_le_bytes([bytes[19], bytes[20], bytes[21], bytes[22]]);
+    let reset = bytes[17];
+    let block_w = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+    let block_h = u32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
     if width == 0 || height == 0 || !matches!(channels, 1..=4) || block_w == 0 || block_h == 0 {
         bail!("header declares impossible geometry");
     }
@@ -814,12 +828,12 @@ fn parse(bytes: &[u8]) -> Result<Parsed> {
         channels,
         block_w,
         block_h,
-        predict: flags & 1 != 0,
+        predictor,
         options: Options {
             source,
             thresholds,
             block: Some(block_w),
-            predict: flags & 1 != 0,
+            predictor,
             base: flags & 2 != 0,
             escape: flags & 4 != 0,
             per_channel: flags & 8 != 0,
@@ -876,10 +890,10 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
             reader: BitReader::new(&bytes[p.body..]),
         };
         let mut kinds = Vec::new();
-        if p.predict {
-            for _ in 0..p.height {
-                let k = src.field(FILTER_KIND_BITS)? as u8;
-                if k >= FILTER_KINDS {
+        if let Some(v) = p.predictor {
+            for _ in 0..v.units(p.width, p.height) {
+                let k = src.field(predictors::KIND_BITS)? as u8;
+                if k >= predictors::KINDS {
                     bail!("filter kind {k} out of range");
                 }
                 kinds.push(k);
@@ -902,12 +916,12 @@ pub fn replay(bytes: &[u8], trace: &Trace) -> Result<RawImage> {
     if !coded.is_empty() {
         // The predictor codes are a fixed cost outside the sample loop; read them normally.
         let mut kinds = Vec::new();
-        if p.predict {
+        if let Some(v) = p.predictor {
             let mut reader = BitReader::new(&bytes[p.body..]);
-            for _ in 0..p.height {
+            for _ in 0..v.units(p.width, p.height) {
                 kinds.push(
                     reader
-                        .read(FILTER_KIND_BITS)
+                        .read(predictors::KIND_BITS)
                         .map_err(|e| anyhow::anyhow!(e))? as u8,
                 );
             }
@@ -940,21 +954,24 @@ fn run_body<S: Source>(
         coded,
         kinds,
         options: p.options,
-        predict: p.predict,
+        predictor: p.predictor,
     };
     body.run(src, data)?;
 
     // The residual-domain context leaves prediction to a pass at the end, exactly as the format
     // does today. The sample-domain one has already undone it inside the block loop.
-    if p.predict && p.options.source == ContextSource::Residual {
-        undo_prediction(
-            data,
-            p.width,
-            p.height,
-            usize::from(p.channels),
-            coded,
-            kinds,
-        );
+    if let Some(v) = p.predictor {
+        if p.options.source == ContextSource::Residual {
+            predictors::undo_in_place(
+                v,
+                data,
+                p.width,
+                p.height,
+                usize::from(p.channels),
+                coded,
+                kinds,
+            );
+        }
     }
     Ok(())
 }
@@ -979,14 +996,32 @@ mod tests {
         let mut v = Vec::new();
         for source in [ContextSource::Sample, ContextSource::Residual] {
             for block in [None, Some(4u32), Some(8)] {
-                for predict in [false, true] {
+                for predictor in [None, Some(Variant::shipped())] {
                     v.push(Options {
                         source,
                         block,
-                        predict,
+                        predictor,
                         ..Default::default()
                     });
                 }
+            }
+        }
+        // The candidate predictors, which only the residual domain may carry.
+        for predictor in [
+            Variant::Fixed(predictors::MED),
+            Variant::Fixed(predictors::GAP),
+            Variant::Choice {
+                scope: predictors::Scope::Block(4),
+                menu: predictors::Menu::Png7,
+            },
+        ] {
+            for block in [None, Some(4u32)] {
+                v.push(Options {
+                    source: ContextSource::Residual,
+                    block,
+                    predictor: Some(predictor),
+                    ..Default::default()
+                });
             }
         }
         for base in [false, true] {

@@ -39,22 +39,30 @@ lossless. It is **not** the default: decode halves, and the floor is the model's
 rather than the codes, so no bit-level work recovers it.
 
 **Measurement harness** (`brp-lab`) — quadtree, Rice, patched frame-of-reference, Huffman, LZW,
-Deflate, PNG-style filters, and the `residual-shape` tool that measures what the format actually
-emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
+Deflate, PNG-style filters, predictor variants including LOCO-I's and CALIC's, and the
+`residual-shape`, `ctx-sweep` and `pred-sweep` tools that measure what the format actually emits. Plus a real photograph corpus, because the synthetic one flatters this algorithm badly
 enough to have justified building the wrong thing.
 
 ## Next, in this order
 
-### 1. Better predictors  ← next
+### 1. Choose the predictor per block, not per row  ← next, and now measured
 
-The five PNG predictors were adopted because they measured best among the variants tried, not
-because they are optimal. Worth testing: the gradient-adjusted predictor from LOCO-I/JPEG-LS, and
-choosing the predictor per block rather than per row.
+Finding 14 answered the "better predictors" item, and not the way it was written. The candidates
+it named — LOCO-I's MED and CALIC's GAP — are worth about half a point. Offering PNG's *existing*
+five per 8x8 block instead of per row is worth **1.5 points on the photographs under the Rice
+coder and 1.3 under the context coder**, and decodes at the control's rate: same predictors, same
+samples, only the lookup that says which one differs.
 
-This moved to the front because version 5 built most of what it needs. The gradient-adjusted
-predictor reads the same three neighbours the context model already quantises, and JPEG-LS's bias
-correction is a second pair of counters beside `A` and `N`. Unlike the context model, a better
-predictor helps *every* coder, and costs decode speed only in the unprediction pass.
+Under the context coder that puts the codec at 56.99% against `filter+deflate`'s 57.50% — ahead of
+PNG's approach on the small photographs, which this file had listed as not planned.
+
+What adoption needs: a filter mode saying the kind codes are laid out per block, a prediction grid
+that is **not** stage 2's block size (the shipped default is the whole image, which would turn a
+per-row choice into a per-image one), a version bump and an ADR. At 8x8 the grid is a constant and
+costs no header field.
+
+MED and GAP are a separate, harder decision: another 0.45 points for a quarter of the decode rate,
+in the same place the context coder spends it. Finding 14 leaves them measured and unadopted.
 
 ### 2. Adaptive block size
 
@@ -101,6 +109,11 @@ commit, with the whole page re-measured — not drifted into.
 - **Beating PNG on the small photographs by ratio alone.** `filter+deflate` sits at 57.5% on the
   eight; the default settings are 3.2 points behind and the context coder 0.8. Closing the last of
   it means another stage, every stage costs speed, and speed is this codec's actual advantage.
+
+  Finding 14 crossed the line anyway, and it is worth being precise about how: the context coder
+  with a per-block predictor choice measures 56.99%, and it got there by making an existing stage
+  adapt more finely rather than by adding one. The entry stands as written — *another stage* is
+  still not worth it — and the line it was drawn around is no longer where the codec sits.
 
   Version 5 is what that product decision looks like when it is actually taken rather than drifted
   into: the ratio is available, it is not the default, and the price is stated in the ADR. The same

@@ -18,14 +18,16 @@
 //! None of this is part of the format. See `docs/FORMAT.md` for what a `.brp` file is.
 
 use anyhow::{bail, Result};
+use crate::predictors::{self, Variant};
 use brp_core::{
-    apply_prediction, plan_channels, undo_prediction, BitReader, BitWriter, BlockGrid, BlockRect,
-    ChannelMode, ChannelOptions, ChannelPlan, RawImage, FILTER_KINDS,
+    apply_prediction, plan_channels, BitReader, BitWriter, BlockGrid, BlockRect, ChannelMode,
+    ChannelOptions, ChannelPlan, RawImage,
 };
 
 const BIT_DEPTH: u32 = 8;
 const WIDTH_CODE_BITS: u32 = 4;
-const FILTER_KIND_BITS: u32 = 3;
+/// Geometry, channel count, coder, predictor, block side. The channel plan follows it.
+const HEADER: usize = 17;
 
 /// Unary prefix cap for Rice codes. Beyond this the value is written raw, so one wild sample
 /// cannot cost hundreds of bits.
@@ -342,21 +344,25 @@ fn read_block_channel(
 pub struct Options {
     pub coder: BlockCoder,
     pub block: u32,
-    pub predict: bool,
+    /// Which predictor produces the residuals, or `None` to pack the samples themselves.
+    /// [`Variant::shipped`] is the format's own per-row choice, and the control for the rest.
+    pub predictor: Option<Variant>,
 }
 
 pub fn encode(img: &RawImage, opts: &Options) -> Vec<u8> {
     let stride = usize::from(img.channels());
     let plan = plan_channels(img.data(), img.channels(), &ChannelOptions::default());
     let coded = plan.coded_indices();
-    let predict = opts.predict && !coded.is_empty();
+    let predictor = if coded.is_empty() { None } else { opts.predictor };
 
-    // Exactly the format's own prediction, so this measures the block coder and nothing else.
-    let (kinds, residuals) = if predict {
-        let (k, r) = apply_prediction(img.data(), img.width(), img.height(), stride, &coded);
-        (k, Some(r))
-    } else {
-        (Vec::new(), None)
+    // With the shipped variant this is the format's own prediction, bit for bit, so a row that
+    // changes only the coder still measures the coder and nothing else.
+    let (kinds, residuals) = match predictor {
+        Some(v) => {
+            let (k, r) = predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
+            (k, Some(r))
+        }
+        None => (Vec::new(), None),
     };
     let data: &[u8] = residuals.as_deref().unwrap_or(img.data());
 
@@ -365,7 +371,7 @@ pub fn encode(img: &RawImage, opts: &Options) -> Vec<u8> {
     out.extend_from_slice(&img.height().to_le_bytes());
     out.push(img.channels());
     out.push(opts.coder.code());
-    out.push(u8::from(predict));
+    out.extend_from_slice(&predictors::code(predictor));
     out.extend_from_slice(&opts.block.to_le_bytes());
     plan.write_to(&mut out);
 
@@ -375,7 +381,7 @@ pub fn encode(img: &RawImage, opts: &Options) -> Vec<u8> {
 
     let mut w = BitWriter::with_capacity(img.data().len());
     for &kind in &kinds {
-        w.write(u32::from(kind), FILTER_KIND_BITS);
+        w.write(u32::from(kind), predictors::KIND_BITS);
     }
 
     let grid = BlockGrid::new(img.width(), img.height(), opts.block, opts.block);
@@ -394,21 +400,21 @@ pub fn encode(img: &RawImage, opts: &Options) -> Vec<u8> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<RawImage> {
-    if bytes.len() < 15 {
+    if bytes.len() < HEADER {
         bail!("stream is shorter than its header");
     }
     let width = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let height = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let channels = bytes[8];
     let coder = BlockCoder::from_code(bytes[9])?;
-    let predict = bytes[10] != 0;
-    let block = u32::from_le_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]);
+    let predictor = predictors::from_code([bytes[10], bytes[11], bytes[12]])?;
+    let block = u32::from_le_bytes([bytes[13], bytes[14], bytes[15], bytes[16]]);
     if width == 0 || height == 0 || !matches!(channels, 1..=4) || block == 0 {
         bail!("header declares impossible geometry");
     }
 
     let (plan, plan_len) =
-        ChannelPlan::parse(&bytes[15..], channels).map_err(|e| anyhow::anyhow!(e))?;
+        ChannelPlan::parse(&bytes[HEADER..], channels).map_err(|e| anyhow::anyhow!(e))?;
     let coded = plan.coded_indices();
     let stride = usize::from(channels);
     let len = (width as usize)
@@ -428,12 +434,12 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
     }
 
     if !coded.is_empty() {
-        let mut r = BitReader::new(&bytes[15 + plan_len..]);
+        let mut r = BitReader::new(&bytes[HEADER + plan_len..]);
         let mut kinds = Vec::new();
-        if predict {
-            for _ in 0..height {
-                let k = r.read(FILTER_KIND_BITS).map_err(|e| anyhow::anyhow!(e))? as u8;
-                if k >= FILTER_KINDS {
+        if let Some(v) = predictor {
+            for _ in 0..v.units(width, height) {
+                let k = r.read(predictors::KIND_BITS).map_err(|e| anyhow::anyhow!(e))? as u8;
+                if k >= predictors::KINDS {
                     bail!("filter kind {k} out of range");
                 }
                 kinds.push(k);
@@ -459,9 +465,9 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
             }
         }
 
-        if predict {
+        if let Some(v) = predictor {
             // Only coded channels were predicted; constants and aliases must be left alone.
-            undo_prediction(&mut data, width, height, stride, &coded, &kinds);
+            predictors::undo_in_place(v, &mut data, width, height, stride, &coded, &kinds);
         }
     }
 
@@ -575,25 +581,33 @@ mod tests {
         BlockCoder::Hybrid,
     ];
 
+    fn predictors() -> [Option<Variant>; 4] {
+        [
+            None,
+            Some(Variant::shipped()),
+            Some(Variant::Fixed(crate::predictors::GAP)),
+            Some(Variant::Choice {
+                scope: crate::predictors::Scope::Block(4),
+                menu: crate::predictors::Menu::Png7,
+            }),
+        ]
+    }
+
     fn round_trip(img: &RawImage) {
         for coder in CODERS {
-            for predict in [false, true] {
+            for predictor in predictors() {
                 for block in [1u32, 4, 8, 1000] {
                     let opts = Options {
                         coder,
                         block,
-                        predict,
+                        predictor,
                     };
+                    let name = predictor.map_or("none".to_string(), |p| p.name());
                     let bytes = encode(img, &opts);
                     let back = decode(&bytes).unwrap_or_else(|e| {
-                        panic!("{} block {block} predict {predict}: {e}", coder.name())
+                        panic!("{} block {block} pred {name}: {e}", coder.name())
                     });
-                    assert_eq!(
-                        &back,
-                        img,
-                        "{} block {block} predict {predict}",
-                        coder.name()
-                    );
+                    assert_eq!(&back, img, "{} block {block} pred {name}", coder.name());
                 }
             }
         }
