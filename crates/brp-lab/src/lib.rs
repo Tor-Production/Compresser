@@ -14,6 +14,7 @@ use std::io::Write;
 
 pub mod blockpack;
 pub mod context;
+pub mod corpus;
 pub mod filters;
 pub mod grid;
 pub mod huffman;
@@ -22,6 +23,7 @@ pub mod predict;
 pub mod predictors;
 pub mod quadtree;
 pub mod remap;
+pub mod stats;
 
 /// One compression pipeline, end to end.
 pub trait Codec: Sync {

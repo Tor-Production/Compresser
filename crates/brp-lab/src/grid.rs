@@ -261,3 +261,176 @@ impl Plane<'_> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Cheaper ways to choose a grid, and a tree an image may decline
+// ---------------------------------------------------------------------------------------------
+
+/// The whole image, spelled as a block size so it can sit in a candidate list.
+pub const WHOLE: u32 = u32::MAX;
+
+impl Plane<'_> {
+    /// [`Plane::uniform_bits`], except that [`WHOLE`] means one block covering the image.
+    pub fn uniform_bits_or_whole(&self, grid: u32) -> u64 {
+        if grid == WHOLE {
+            self.block_bits(0, 0, self.width, self.height)
+        } else {
+            self.uniform_bits(grid)
+        }
+    }
+
+    /// The cheapest grid among `candidates`, costed exactly, and what it costs.
+    pub fn best_grid(&self, candidates: &[u32]) -> (u32, u64) {
+        candidates
+            .iter()
+            .map(|&g| (g, self.uniform_bits_or_whole(g)))
+            .min_by_key(|&(g, bits)| (bits, g))
+            .unwrap_or((WHOLE, 0))
+    }
+
+    /// The same choice made from [`Plane::block_bits_estimate`] instead of exact costs.
+    ///
+    /// The *bits* returned are the exact cost of the grid the estimate chose, not the estimate —
+    /// what a cheaper prescan costs an encoder is the grid it lands on, and it should be priced in
+    /// the same currency as every other column.
+    pub fn best_grid_estimated(&self, candidates: &[u32]) -> (u32, u64) {
+        let grid = candidates
+            .iter()
+            .map(|&g| (g, self.uniform_bits_estimate(g)))
+            .min_by_key(|&(g, bits)| (bits, g))
+            .map_or(WHOLE, |(g, _)| g);
+        (grid, self.uniform_bits_or_whole(grid))
+    }
+
+    /// One pass over a rectangle instead of ten, at the cost of being an estimate.
+    ///
+    /// [`Plane::block_bits`] finds the Rice parameter by costing all nine of them and keeping the
+    /// best. This takes the parameter straight from the block's mean residual by the rule the
+    /// context coder already uses — the smallest `k` with `n << k >= sum` — and then costs the
+    /// block analytically. It is the codec's own parameter rule, applied per block rather than per
+    /// context, so it is a cheaper *prescan*, not a different model.
+    ///
+    /// What it gives up: it ignores the escape code, so a block with a few enormous residuals is
+    /// underpriced, and it approximates `sum(v >> k)` by `sum(v) >> k`, which overprices every
+    /// block by up to half a bit per sample. The second bias is nearly constant across grids over
+    /// the same image — they all cover the same samples — so it largely cancels in a comparison,
+    /// which is the only thing this is used for.
+    pub fn block_bits_estimate(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> u64 {
+        if x0 >= x1 || y0 >= y1 {
+            return 0;
+        }
+        let n = u64::from(x1 - x0) * u64::from(y1 - y0);
+        let mut bits = 0;
+        for slot in 0..self.coded.len() {
+            let c = self.coded.channel(slot);
+            let (mut min, mut sum) = (u8::MAX, 0u64);
+            for y in y0..y1 {
+                let mut i = (y as usize * self.width as usize + x0 as usize) * self.stride + c;
+                for _ in x0..x1 {
+                    let v = self.data[i];
+                    min = min.min(v);
+                    sum += u64::from(v);
+                    i += self.stride;
+                }
+            }
+            let total = sum - n * u64::from(min);
+            bits += BLOCK_HEADER_BITS + rice_bits_from_mean(n, total);
+        }
+        bits
+    }
+
+    /// [`Plane::uniform_bits`] under the estimate.
+    pub fn uniform_bits_estimate(&self, block: u32) -> u64 {
+        if block == WHOLE {
+            return self.block_bits_estimate(0, 0, self.width, self.height);
+        }
+        let mut bits = 0;
+        let mut y = 0;
+        while y < self.height {
+            let mut x = 0;
+            while x < self.width {
+                if let Some((x0, y0, x1, y1)) = self.clip(x, y, block) {
+                    bits += self.block_bits_estimate(x0, y0, x1, y1);
+                }
+                x += block;
+            }
+            y += block;
+        }
+        bits
+    }
+
+    /// The 32/64 tree of [`Plane::restricted_tree_bits`], with one bit per **image** saying
+    /// whether there is a tree in this file at all.
+    ///
+    /// Without that bit every 32x32 block pays at least one decision bit, on every image, including
+    /// the ones where the tree never splits and never merges and the answer is the uniform grid it
+    /// started from. The bit makes the tree something an encoder can decline, so the design can
+    /// only ever lose one bit per file rather than one per block.
+    ///
+    /// `fallback` is what the same image costs on the grid the format would otherwise use.
+    pub fn restricted_tree_with_optout(&self, fallback: u64) -> TreeChoice {
+        let (tree, leaves) = self.restricted_tree_bits();
+        if tree < fallback {
+            TreeChoice {
+                bits: IMAGE_DECISION_BITS + tree,
+                used: true,
+                leaves,
+            }
+        } else {
+            TreeChoice {
+                bits: IMAGE_DECISION_BITS + fallback,
+                used: false,
+                leaves: Leaves::default(),
+            }
+        }
+    }
+}
+
+/// One bit in the file header: "is there a tree in this image at all?"
+pub const IMAGE_DECISION_BITS: u64 = 1;
+
+/// What [`Plane::restricted_tree_with_optout`] settled on.
+pub struct TreeChoice {
+    pub bits: u64,
+    /// False when the image declined the tree and took the fallback grid.
+    pub used: bool,
+    /// Empty when the tree was declined.
+    pub leaves: Leaves,
+}
+
+/// Rice cost of `n` residuals summing to `total`, at the parameter the codec's own rule picks.
+///
+/// The rule is `context.rs`'s: the smallest `k` with `n << k >= total`. Written here in terms of a
+/// block's totals rather than a context's running counters, because a prescan has the totals and
+/// does not want to run the model.
+fn rice_bits_from_mean(n: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    let mut k = 0u32;
+    while k < 8 && (n << k) < total {
+        k += 1;
+    }
+    n * u64::from(k + 1) + (total >> k)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_parameter_rule_matches_the_context_coder_s() {
+        // Smallest k with n << k >= total, capped at 8.
+        assert_eq!(rice_bits_from_mean(4, 0), 0);
+        // total 4, n 4: k = 0 fits, so 4 * 1 + 4.
+        assert_eq!(rice_bits_from_mean(4, 4), 8);
+        // total 16, n 4: k = 2 is the first with 4 << k >= 16, so 4 * 3 + 4.
+        assert_eq!(rice_bits_from_mean(4, 16), 16);
+    }
+
+    #[test]
+    fn the_parameter_is_capped_where_the_coder_caps_it() {
+        // A block of huge residuals cannot ask for k above 8.
+        assert_eq!(rice_bits_from_mean(1, 1 << 20), 9 + ((1 << 20) >> 8));
+    }
+}

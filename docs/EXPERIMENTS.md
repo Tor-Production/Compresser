@@ -881,6 +881,224 @@ one apart modulo 256 and code as a magnitude of 1, and after compaction to a 200
 same pair is 56 apart. On this corpus that never outweighed the compaction, but it is the reason
 "monotone, therefore never worse" is false.
 
+### 18. Four thousand images, and the question the twenty-five could not answer
+
+Findings 15 to 17 all end in a claim about a *distribution* — the best block size splits by kind of
+image, a tree pays where regions differ in kind, interior alphabet gaps are all-or-nothing — and
+all three were measured on twenty-five images chosen by hand to bracket the algorithm. Twenty-five
+images cannot carry a claim about a distribution, and eight photographs agreeing is not evidence
+that photographs agree.
+
+`scripts/fetch-corpus.py` builds a corpus outside the repository, one directory per class, and
+`block-sweep`, `quadtree-rice` and `remap-sweep` now take that directory as an image's **class** and
+report quartiles and histograms rather than means. `BRP_SAMPLE` caps each class.
+
+#### The corpus
+
+5251 images fetched; the runs below cap each class at 1000, for 4206.
+
+| Class | n | Sources | Licence |
+|---|---:|---|---|
+| `photo` | 786 | crops from CC0 camera raw (762), Kodak suite (24) | CC0, research use |
+| `synthetic` | 1000 | OpenClipart renders (983), `gen-samples` (17) | CC0 |
+| `texture-ui` | 988 | Bootstrap and Material icons (696), ambientCG maps (292) | MIT, Apache-2.0, CC0 |
+| `screenshot` | 1000 | F-Droid phone (852), Flathub desktop (148) | per-app free software |
+| `photo-lossy` | 432 | DIV2K crops — **a probe row, never a photograph row** | mixed provenance |
+
+Two decisions about the corpus are themselves results, so they are stated before any number.
+
+**The photograph class is built from raw and cropped, never resized.** `is_supported_image` refuses
+JPEG on purpose, and nearly every mass photograph dataset is JPEG-derived; transcoding one to PNG
+would launder it past that guard on precisely the axis being measured, since smoothed content
+prefers larger blocks. A downscale would do the same thing, so one 12-megapixel frame becomes
+several 768x512 tiles — a crop preserves the pixel statistics exactly.
+
+**`photo-lossy` exists to price that decision rather than assume it.** It is DIV2K, which ships as
+PNG but whose sources are of mixed provenance. It is reported as its own row and never merged.
+
+#### Does the class predict the best block size?
+
+Each image's own best square grid, as a share of its class:
+
+| Class | n | 8x8 | 16x16 | 32x32 | 64x64 |
+|---|---:|---:|---:|---:|---:|
+| `photo` | 786 | 1.1% | 18.2% | 28.2% | **52.4%** |
+| `photo-lossy` | 432 | 17.6% | **58.6%** | 19.4% | 4.4% |
+| `screenshot` | 1000 | 22.6% | **70.8%** | 5.9% | 0.7% |
+| `synthetic` | 1000 | **57.1%** | 41.4% | 0.2% | 1.3% |
+| `texture-ui` | 988 | **68.0%** | 10.4% | 6.8% | 14.8% |
+| pooled | 4206 | 36.9% | 38.5% | 10.3% | 14.2% |
+
+Read as classes, this says the hypothesis is confirmed and **inverted**: photographs are the class
+that most wants *large* blocks, and synthetic content the class that most wants *small* ones. The
+guess going in was the opposite — photographs to finer blocks, synthetic toward the whole image.
+
+**Read per source, it says something else, and this is the finding.** The same table split by the
+directory each image came from:
+
+| Source | n | 8x8 | 16x16 | 32x32 | 64x64 |
+|---|---:|---:|---:|---:|---:|
+| `icons` | 696 | **94.4%** | 5.3% | 0.3% | — |
+| `clipart` | 983 | 57.8% | 41.9% | 0.1% | 0.2% |
+| `desktop` | 148 | 38.5% | 57.4% | 2.7% | 1.4% |
+| `phone` | 852 | 19.8% | **73.1%** | 6.5% | 0.6% |
+| `div2k` | 432 | 17.6% | 58.6% | 19.4% | 4.4% |
+| `kodak` | 24 | 8.3% | **91.7%** | — | — |
+| `ambientcg` | 292 | 5.1% | 22.6% | 22.3% | **50.0%** |
+| `raw-crop` | 762 | 0.9% | 15.9% | 29.1% | **54.1%** |
+| `generated` | 17 | 17.6% | 11.8% | 5.9% | **64.7%** |
+
+**Two of the four classes are internally bimodal to the point where the class label predicts
+nothing.** `texture-ui` is 94.4% 8x8 in its icons and 50.0% 64x64 in its material maps — opposite
+ends of the sweep, averaged into a class median that describes neither. `photo` is 91.7% 16x16 in
+its film scans and 54.1% 64x64 in its raw crops.
+
+That last split is the one to be careful about, because it is an artifact of the corpus and not of
+photography. Demosaicing reconstructs every output pixel by interpolating its neighbours, so a
+developed raw frame is smooth at pixel scale in a way a drum-scanned negative is not; the residuals
+are small and uniform, and larger blocks amortise the per-block header better. Kodak's 91.7% at
+16x16 reproduces finding 15, where all eight photographs chose 16x16. `div2k` — the probe row, from
+a different pipeline again — lands at 58.6% for the same grid. **Two independent non-demosaiced
+photograph sources agree on 16x16; the demosaiced one does not.**
+
+Choosing raw over JPEG to avoid one smoothing artifact introduced a different and larger one. Both
+are legitimate codec inputs — a photographer's raw-to-PNG export really is demosaiced — but they
+are not interchangeable evidence, and "photograph" is not one population for this question.
+
+So the honest answer: **what predicts the best block size is pixel-scale smoothness, which tracks an
+image's provenance and scale, and that cuts across the four classes rather than along them.**
+`screenshot` is the only class that is internally coherent — phone 73.1% and desktop 57.4%, both at
+16x16 — and it is the class assembled from one kind of pipeline.
+
+What a fixed grid costs, per image, against that image's own best, in points of raw:
+
+| Class | pinned 16x16, median | q3 | already best | pinned 8x8, median |
+|---|---:|---:|---:|---:|
+| `photo` | 0.32 | 0.45 | 18.2% | 1.78 |
+| `photo-lossy` | 0.00 | 0.17 | 58.6% | 0.80 |
+| `screenshot` | 0.00 | 0.06 | 70.8% | 0.61 |
+| `synthetic` | 0.43 | 1.10 | 41.4% | 0.00 |
+| `texture-ui` | 0.77 | 1.38 | 10.4% | 0.00 |
+| pooled | 0.22 | 0.79 | 38.5% | 0.51 |
+
+**The bowl of finding 15 is still shallow, and 16x16 is still the best single answer** — it is the
+modal choice pooled and costs a median 0.22 points against per-image optimality. But it is the best
+*compromise*, not a preference anything holds: it is already optimal for 70.8% of screenshots and
+for 10.4% of texture and UI images.
+
+The shipped default — the whole image — is the control, and it is expensive on everything except
+photographs: median 15.16% of raw against 16x16's 6.60% on screenshots, 16.91% against 12.66% on
+synthetic content, and 47.95% against 47.64% on photographs, where the residuals are flat enough
+that the grid barely matters.
+
+#### The 32/64 tree, and the per-image bit that turned out to be dead weight
+
+`quadtree-rice` prices every partitioning in the bits `block_coder` 1 would really spend. These are
+cost-model figures over 4202 images — the 4 with no block stream at all are dropped — not encoded
+files, so unlike every other table here nothing is round-tripped; the model is the same arithmetic
+findings 15 and 16 used.
+
+Median gain against a pinned 16x16 grid, in points of raw, negative being smaller:
+
+| Class | quadtree ceiling | 32/64 tree | 32/64 + per-image bit | share the tree helps |
+|---|---:|---:|---:|---:|
+| `photo` | −0.46 | **−0.40** | −0.40 | 100.0% |
+| `photo-lossy` | −0.52 | −0.22 | −0.22 | 100.0% |
+| `screenshot` | −0.97 | −0.34 | −0.34 | 100.0% |
+| `synthetic` | −1.49 | −0.19 | −0.19 | 99.3% |
+| `texture-ui` | −1.24 | −0.11 | −0.11 | 93.5% |
+| pooled | −0.87 | −0.26 | −0.26 | 98.3% |
+
+**The extra bit per image buys nothing: 4131 of 4202 images keep the tree.** It was proposed so an
+image that does not want a tree would not pay a bit per block; 98.3% of images want one, the opt-out
+fires on 1.7% of the corpus, and the two columns are identical to two decimals in every class. If
+this design is ever revived, revive it without the bit.
+
+The tree itself is real, consistent and larger than finding 16 measured, and still not worth it —
+a quarter of a point for a decoder that must handle three block sizes in one image. What the two
+shippable designs reach of the ceiling remains split by class exactly as finding 16 argued: the
+tree takes 87% of the ceiling on `photo` and 9% on `texture-ui`, while the auto grid takes 58% on
+`texture-ui` and none of it on `screenshot`.
+
+#### The auto grid, and two cheaper ways to choose it
+
+| Class | auto grid, median gain | images improved |
+|---|---:|---:|
+| `texture-ui` | **−0.72** | 89.4% |
+| `synthetic` | −0.45 | 59.0% |
+| `photo` | −0.32 | 81.8% |
+| `photo-lossy` | 0.00 | 41.2% |
+| `screenshot` | 0.00 | 30.8% |
+| pooled | −0.22 | 61.9% |
+
+Two classes want it badly and two do not want it at all, which is the case for choosing per image
+instead of legislating a number.
+
+The prescan was 5.1x the cost of costing one grid in finding 16, and is 6.2x here. Both cheaper
+options asked for were measured, over the same corpus, best of three interleaved rounds per image:
+
+| Prescan | Candidates | Cost | Agrees with exact | Median regret | Worst |
+|---|---:|---:|---:|---:|---:|
+| one grid, exact (control) | 1 | 1.0x | — | — | — |
+| exact, five candidates | 5 | 6.2x | — | — | — |
+| exact, 8x8 vs 16x16 | 2 | 2.0x | 75.0% | 0.000 | 0.592 |
+| **estimated, five candidates** | 5 | **2.4x** | 64.5% | **0.000** | 2.951 |
+
+The estimate takes the Rice parameter from the block's mean residual by the rule `context.rs`
+already uses — the smallest `k` with `n << k >= sum` — rather than costing all nine parameters, and
+approximates `sum(v >> k)` by `sum(v) >> k`. It is the codec's own parameter rule applied per block
+instead of per context, so it is a cheaper prescan and not a different model. **It buys all five
+candidates for 2.4x where the exact scan wants 6.2x, at a median regret of zero.**
+
+**The two-candidate shortlist is a trap, and the reason is the corpus it came from.** It is the
+cheapest option at 2.0x and agrees with the exact prescan on 75% of the corpus — but on photographs
+it agrees on **152 of 786 images** and costs a median 0.313 points, because photographs want 32x32,
+64x64 and the whole image, and a shortlist of 8x8 against 16x16 cannot offer them. Restricting a
+prescan to the grids the old corpus argued over inherits that corpus's blind spot.
+
+#### Where alphabet compaction fires, and where it now makes files larger
+
+Interior gaps per channel, and what the shipped stage 0.5 does with them at 16x16 blocks. Every
+size here is a real encode, decoded back to the source pixels.
+
+| Class | interior gaps, median | q3 | max | rule fires on |
+|---|---:|---:|---:|---:|
+| `photo` | 1 | 5 | 208 | 4.6% of images |
+| `photo-lossy` | 0 | 2 | 180 | 0.7% |
+| `screenshot` | 0 | 6 | 254 | 14.8% |
+| `synthetic` | 0 | 0 | 235 | 2.0% |
+| `texture-ui` | 1 | 12 | 247 | **20.1%** |
+| pooled | 0 | 3 | 254 | 9.7% |
+
+Finding 17's central observation survives: a channel either has no interior gaps or has hundreds,
+and the median channel has none. The transform is for a minority of images, and it finds them —
+where it fires it is worth up to 11.5 points on a synthetic image and 6.7 on a screenshot.
+
+**ADR 0011 needs one correction. It says no image in the corpus regresses; at 168 times the corpus
+size, 209 of 4206 do.**
+
+| Class | images larger under the shipped rule | worst | best |
+|---|---:|---:|---:|
+| `photo` | 34 of 786 | +0.014 | −0.030 |
+| `photo-lossy` | 3 of 432 | +0.002 | −0.144 |
+| `screenshot` | 51 of 1000 | +0.372 | −6.664 |
+| `synthetic` | 13 of 1000 | +1.169 | −11.469 |
+| `texture-ui` | **108 of 988** | **+2.478** | −4.272 |
+| pooled | 209 of 4206 | +2.478 | −11.469 |
+
+`texture-ui` is where it hurts: of the 199 images the rule fired on, the median gain is 0.000 and
+the upper quartile is **+0.421**, so more than a quarter of the fires make the file bigger. The
+criterion is not the problem — the amortisation condition is. The shipped rule asks that the map
+narrow a sample by at least one bit and that the corpus pay for the table four times over, and on a
+1024x1024 material map with a few hundred interior gaps that test passes while the transform still
+loses, because the residuals it has to code are differences modulo 256 and compaction shortens the
+circle they live on. Finding 17 named that mechanism and had no image that demonstrated it. There
+are now 209.
+
+**The criterion decision itself is confirmed emphatically.** Under the missing-value criterion
+finding 17 rejected, **2919 of 4206 images get larger**, by up to 10.963 points — against 209 and
+2.478 for the shipped rule. Six images at the small scale; seven in ten at this one.
+
 ## Adopted into the format
 
 Prediction landed in version 3 (ADR 0006), Golomb-Rice in version 4 (ADR 0007), the
@@ -968,6 +1186,15 @@ gap between a transform and where it sits.
    corpus, nothing on photographs, nothing in speed. The ordering turned out to matter more than
    the transform — before stage 1 a text page is 3.38% of raw, after it 10.0% — because compaction
    is what makes three channels identical enough to alias.
+
+8. **Measure it all again on a corpus with statistical weight.** Done, finding 18, on 4206 images in
+   four classes plus a probe. It confirms 16x16 as the best single grid and the interior-gap
+   criterion, kills the per-image opt-out bit proposed for the 32/64 tree (98.3% of images keep the
+   tree), makes the auto grid worth adopting with an estimating prescan at 2.4x rather than 6.2x,
+   and narrows ADR 0011's "nothing regresses" to 209 images that do. Its largest result is
+   methodological: **two of the four classes are internally bimodal**, so an image's provenance
+   predicts its best block size better than its class does, and any future corpus has to report per
+   source or it will average two answers into one that describes neither.
 
 Not worth pursuing on this evidence: patched frame of reference (3.5% against Rice's 16.5%), a
 per-block choice between fixed and Rice (the flag costs more than it saves), and an LZ77 stage

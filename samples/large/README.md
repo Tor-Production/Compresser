@@ -1,10 +1,15 @@
 # Large images
 
-Kept out of `samples/` proper on purpose. The tools read one directory and are not recursive, so
-an image here is measured only when you ask for it:
+Kept out of `samples/` proper on purpose, in its own directory:
 
     cargo run -p brp-bench --release -- samples/large
     cargo run -p brp-lab --release -- samples/large
+
+`brp-bench` and the `brp-lab` runner read one directory and are not recursive, so an image here is
+measured only when you ask for it. **The class-aware tools — `block-sweep`, `quadtree-rice` and
+`remap-sweep` — do recurse**, and they take the directory an image sits in as its *class*. Pointed
+at `samples/`, they therefore report `large` as a class of its own rather than folding a 130 MiB
+photograph into anybody else's figures, which is the same guarantee by a different mechanism.
 
 ## Why separate
 

@@ -91,7 +91,16 @@ cargo bench -p brp-core                  # encode/decode MB/s
 cargo run -p brp-bench --release -- samples/   # ratio vs PNG/WebP across block sizes
 cargo run -p brp-lab --release -- samples/     # experimental pipelines: size and speed
 cargo run -p brp-cli --release -- info file.brp
+
+python scripts/fetch-corpus.py --root C:\brp-corpus   # the mass corpus, one directory per class
+$env:BRP_SAMPLE=100                                   # cap every class, to prove a pipeline first
+cargo run -p brp-lab --release --bin block-sweep -- C:\brp-corpus
 ```
+
+`block-sweep`, `quadtree-rice` and `remap-sweep` take the directory an image sits in as its
+**class** and report **distributions** — histograms and quartiles, not means. A corpus mean is
+compatible with every image agreeing and with the class being split down the middle, and finding 18
+is the difference between those two.
 
 ## Current state and scope
 

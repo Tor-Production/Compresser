@@ -59,6 +59,12 @@ what the format actually emits.
 Plus a real photograph corpus, because the synthetic one flatters this algorithm badly enough to
 have justified building the wrong thing.
 
+**A mass corpus** (`scripts/fetch-corpus.py`) — a few thousand images outside the repository, one
+directory per class, which `block-sweep`, `quadtree-rice` and `remap-sweep` read as classes and
+report as distributions rather than means. Finding 18 is what it was built to answer, and its
+methodological result is that per-*source* reporting is not optional: two of the four classes turned
+out to be internally bimodal, so a class mean describes neither half.
+
 ## Next, in this order
 
 ### 1. Deciding what the documented configuration is
@@ -84,6 +90,43 @@ the cheapest. It is worth **1.02 points on the synthetic corpus** and nothing on
 which all prefer 16x16 anyway, and costs about a quarter more encode time. That is the same
 "measure rather than guess" bargain `FilterChoice::Auto` already makes, and it would make the
 documented block size a fallback rather than a decision.
+
+**Decision, on 4202 images across four classes (finding 18): adopt the auto grid, and choose it
+with the estimating prescan rather than the exact one.**
+
+The per-image gain against a pinned 16x16 grid, as a median with the quartiles beside it, is
+**−0.22 points pooled** and splits hard by class:
+
+| | median gain | images improved |
+|---|---:|---:|
+| `texture-ui` | **−0.72** | 89.4% |
+| `synthetic` | −0.45 | 59.0% |
+| `photo` | −0.32 | 81.8% |
+| `screenshot` | 0.00 | 30.8% |
+| `photo-lossy` | 0.00 | 41.2% |
+
+Two classes want it badly, two do not want it at all, and no fixed grid can serve both — which is
+the case for choosing per image rather than legislating a number. It is a larger and better-founded
+effect than finding 16's, which saw only the synthetic half of it on fifteen images.
+
+**What it costs, and why the estimator is the right prescan.** Over the same corpus, best of three
+interleaved rounds per image, against the one grid an encoder already costs anyway:
+
+| prescan | candidates | cost | agrees with exact | median regret | worst |
+|---|---:|---:|---:|---:|---:|
+| exact, five candidates | 5 | 6.2x | — | — | — |
+| exact, 8x8 vs 16x16 | 2 | 2.0x | 75.0% | 0.000 | 0.592 |
+| **estimated, five candidates** | 5 | **2.4x** | 64.5% | **0.000** | 2.951 |
+
+The estimate takes the Rice parameter from the block's mean residual by the rule `context.rs`
+already uses — the smallest `k` with `n << k >= sum` — instead of costing all nine parameters. It
+buys all five candidates for 2.4x where the exact scan wants 6.2x, and its median regret is zero.
+
+**The two-candidate shortlist is the trap.** It looks cheapest at 2.0x and it agrees with the exact
+prescan on 75% of the corpus — but on photographs it agrees on **152 of 786 images** and costs a
+median 0.313 points, because photographs want 32x32, 64x64 and the whole image, and a shortlist of
+8x8 and 16x16 cannot offer them. A prescan restricted to the grids the old corpus argued over
+inherits that corpus's blind spot.
 
 ## Later
 
@@ -111,11 +154,33 @@ documented block size a fallback rather than a decision.
   1.17, and a 32/64 two-bit tree takes 0.22 of the photographs' 0.46. A recursive tree in the
   bitstream buys the difference — 0.24 points on photographs, 0.15 on synthetic — for a
   variable-size block loop in the decoder.
+
+  **Re-measured on 4202 images (finding 18), the ceiling is larger than the small corpus said and
+  the conclusion does not change.** Against a pinned 16x16 grid the exact quadtree gains a median
+  **−0.87 points** pooled and improves 100% of images in every class — −1.49 on `synthetic`, −1.24
+  on `texture-ui`, −0.97 on `screenshot`, −0.46 on `photo`. What the two shippable designs reach of
+  it also splits by class: the 32/64 tree takes 87% of the ceiling on `photo` and 9% on
+  `texture-ui`, while the auto grid takes 58% on `texture-ui` and none of it on `screenshot`.
+  Neither mechanism is close to the ceiling on the classes the other one serves, which is finding
+  16's conclusion holding at 180 times the sample size.
 - **A 32/64 split-and-merge tree.** Worth 0.22 points on photographs and 0.37 on the synthetic
   corpus (finding 16), for two bits per 32x32 block and a decoder that must handle three block
   sizes in one image. Cheaper than a quadtree and it earns its place only if the block loop is
   rewritten for another reason; the alphabet transform above is four times the win for none of
   that complexity.
+
+  **Decision, on 4202 images (finding 18): still not adopted, and the proposed per-image opt-out
+  bit is dead weight.** Against a pinned 16x16 grid the tree is worth a median **−0.26 points**
+  pooled — −0.40 on `photo`, −0.34 on `screenshot`, −0.19 on `synthetic`, −0.11 on `texture-ui` —
+  and it improves 98.3% of images, so it is real, consistent and larger than finding 16 measured.
+  It is still half a point at best, for a decoder that must handle three block sizes in one image,
+  and the auto grid above is a bigger win for a header field that already exists.
+
+  The extra bit per *image* saying whether the file has a tree at all was measured and buys
+  nothing: **4131 of 4202 images keep the tree**, so the opt-out fires on 1.7% of the corpus and
+  the `32/64` and `32/64+bit` columns are identical to two decimals in every class. The bit was
+  proposed to stop images that do not want a tree from paying a bit per block; almost no image
+  does not want one. If this design is ever revived, revive it without the bit.
 - **LZW.** Measured at 80.9% against Deflate's 56.0% on the same bytes. Dictionary matching without
   a good entropy stage is not competitive, and Deflate already provides both.
 - **Patched frame of reference.** The textbook fix for BRP's exact weakness, and half our blocks

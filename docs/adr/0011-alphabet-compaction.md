@@ -1,6 +1,6 @@
 # ADR 0011 — Compacting a channel's alphabet
 
-**Status:** accepted (2026-09-07)
+**Status:** accepted (2026-09-07). One claim below was later narrowed — see the note at the end.
 
 ## Context
 
@@ -119,3 +119,21 @@ pass over the samples, applying the map is a byte lookup, and undoing it is anot
   feed it. Worth measuring one day; not this change.
 - **Storing the alphabet as a list of *used* values.** The used set is the larger of the two on
   everything the transform fires on, which is why both forms name the missing values instead.
+
+## Later correction: "nothing regresses" was a claim about twenty-five images
+
+Finding 18 re-ran this on 4206 images across four classes. **The decision stands and the criterion
+is confirmed emphatically** — under the missing-value criterion rejected above, 2919 of those images
+get larger, by up to 10.963 points, against 209 and 2.478 for the shipped rule.
+
+But "no image in the corpus regresses", stated above and in finding 17, was true of that corpus and
+is not true in general. At scale the shipped rule makes **209 of 4206 images larger**, concentrated
+in technical textures and UI: 108 of 988, worst +2.478 points. Of the `texture-ui` images it fires
+on, the upper quartile of the gain is +0.421 — more than a quarter of those fires lose.
+
+The criterion is not what fails; the amortisation condition is. "Narrow a sample by one bit and pay
+for the table four times over" passes on a 1024x1024 material map with a few hundred interior gaps
+while the transform still loses, because the residuals are differences modulo 256 and compaction
+shortens the circle they live on. That mechanism is described above under "Why it is not simply
+free", where it had no image to demonstrate it. It now has 209, and tightening that condition is
+worth its own measurement.
