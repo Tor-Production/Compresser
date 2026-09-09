@@ -2,7 +2,7 @@
 
 ```yaml
 experiment_id: "issue-NNN/run-name"
-issue: "https://github.com/Yurii-Tor/Compresser/issues/NNN"
+issue: "https://github.com/Tor-Production/Compresser/issues/NNN"
 intent: "historical-reproduction | current-revalidation"
 commit: "<full SHA>"
 branch: "<branch>"
