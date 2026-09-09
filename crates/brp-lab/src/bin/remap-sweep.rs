@@ -56,7 +56,8 @@ fn measure_shipped(img: &RawImage, remap: RemapChoice) -> Result<usize> {
 fn measure_criterion(img: &RawImage, census: &[Census], criterion: Criterion) -> Result<usize> {
     let map = remap::plan_by(census, criterion, 1);
     let there = remap::apply(img, &map);
-    let bytes = brp_core::encode(&there, &options(RemapChoice::Off)).map_err(|e| anyhow::anyhow!(e))?;
+    let bytes =
+        brp_core::encode(&there, &options(RemapChoice::Off)).map_err(|e| anyhow::anyhow!(e))?;
 
     let back = brp_core::decode(&bytes).map_err(|e| anyhow::anyhow!(e))?;
     if remap::undo(&back, &map)? != *img {
@@ -127,7 +128,10 @@ fn print_class(label: &str, rows: &[&Row]) {
     println!("\n  the census, one row per channel of every image");
     println!("  {:<16}{}", "metric", stats::SUMMARY_HEADER);
     for (name, f) in [
-        ("distinct values", &Census::distinct as &dyn Fn(&Census) -> usize),
+        (
+            "distinct values",
+            &Census::distinct as &dyn Fn(&Census) -> usize,
+        ),
         ("missing values", &Census::missing),
         ("interior gaps", &Census::interior_gaps),
     ] {
@@ -141,15 +145,21 @@ fn print_class(label: &str, rows: &[&Row]) {
     println!("\n  channels of an image with at least one interior gap");
     stats::print_histogram(
         "    ",
-        &stats::histogram(rows.iter().map(|r| {
-            format!("{} of {}", r.gapped_channels(), r.census.len())
-        })),
+        &stats::histogram(
+            rows.iter()
+                .map(|r| format!("{} of {}", r.gapped_channels(), r.census.len())),
+        ),
     );
 
     // ---- what the shipped transform is worth
     let corpus_raw: usize = rows.iter().map(|r| r.raw).sum();
     println!("\n  size as a share of the image's own raw samples, %, {BLOCK}x{BLOCK} blocks");
-    println!("  {:<12}{}  {:>9}", "remap", stats::SUMMARY_HEADER, "corpus");
+    println!(
+        "  {:<12}{}  {:>9}",
+        "remap",
+        stats::SUMMARY_HEADER,
+        "corpus"
+    );
     let columns: [Column; 3] = [
         ("off (v6)", &|r: &Row| r.off, false),
         ("gaps", &|r: &Row| r.gaps, true),

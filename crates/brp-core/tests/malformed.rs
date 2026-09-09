@@ -4,7 +4,8 @@
 
 use brp_core::{
     analyze, decode, encode, BrpError, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
-    RawImage, RemapChoice};
+    RawImage, RemapChoice,
+};
 
 /// Header length when every channel is coded — no alias byte, no constants.
 const BODY_AT: usize = 27;
@@ -123,10 +124,7 @@ fn a_rank_outside_the_alphabet_is_refused() {
 fn alphabet_bitmap_padding_must_be_zero() {
     let mut bytes = mapped_file();
     bytes[MAP_AT + 3] |= 0x01;
-    assert_eq!(
-        decode(&bytes).unwrap_err(),
-        BrpError::AlphabetPaddingSet
-    );
+    assert_eq!(decode(&bytes).unwrap_err(), BrpError::AlphabetPaddingSet);
 }
 
 #[test]

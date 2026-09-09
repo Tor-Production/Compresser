@@ -17,8 +17,8 @@
 //!
 //! None of this is part of the format. See `docs/FORMAT.md` for what a `.brp` file is.
 
-use anyhow::{bail, Result};
 use crate::predictors::{self, Variant};
+use anyhow::{bail, Result};
 use brp_core::{
     apply_prediction, plan_channels, BitReader, BitWriter, BlockGrid, BlockRect, ChannelMode,
     ChannelOptions, ChannelPlan, RawImage,
@@ -365,13 +365,18 @@ pub fn encode(img: &RawImage, opts: &Options) -> Vec<u8> {
     let stride = usize::from(img.channels());
     let plan = plan_channels(img.data(), img.channels(), &ChannelOptions::default());
     let coded = plan.coded_indices();
-    let predictor = if coded.is_empty() { None } else { opts.predictor };
+    let predictor = if coded.is_empty() {
+        None
+    } else {
+        opts.predictor
+    };
 
     // With the shipped variant this is the format's own prediction, bit for bit, so a row that
     // changes only the coder still measures the coder and nothing else.
     let (kinds, residuals) = match predictor {
         Some(v) => {
-            let (k, r) = predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
+            let (k, r) =
+                predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
             (k, Some(r))
         }
         None => (Vec::new(), None),
@@ -450,7 +455,9 @@ pub fn decode(bytes: &[u8]) -> Result<RawImage> {
         let mut kinds = Vec::new();
         if let Some(v) = predictor {
             for _ in 0..v.units(width, height) {
-                let k = r.read(predictors::KIND_BITS).map_err(|e| anyhow::anyhow!(e))? as u8;
+                let k = r
+                    .read(predictors::KIND_BITS)
+                    .map_err(|e| anyhow::anyhow!(e))? as u8;
                 if k >= predictors::KINDS {
                     bail!("filter kind {k} out of range");
                 }

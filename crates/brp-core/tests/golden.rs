@@ -10,7 +10,8 @@
 //! fixtures depend on which way that comparison happened to fall.
 
 use brp_core::{
-    decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage, RemapChoice};
+    decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage, RemapChoice,
+};
 
 /// No prediction, fixed-width block packing: the plainest encoding the format can produce.
 fn plain(block: Option<(u32, u32)>) -> EncodeOptions {

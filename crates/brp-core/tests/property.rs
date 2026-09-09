@@ -1,7 +1,9 @@
 //! Property tests for the two invariants that matter most: losslessness, and never panicking.
 
 use brp_core::{
-    analyze, decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage, RemapChoice};
+    analyze, decode, encode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice, RawImage,
+    RemapChoice,
+};
 use proptest::prelude::*;
 
 /// An arbitrary image: dimensions up to 32x32, any channel count, arbitrary samples.

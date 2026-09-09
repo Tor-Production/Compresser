@@ -42,8 +42,23 @@ is worth another 1.6 and costs half the decode speed, so it is opt-in.
 | Why is it this way? | `docs/adr/` |
 | What have we measured? | `docs/EXPERIMENTS.md` |
 | What comes next, and why in that order? | `docs/ROADMAP.md` |
+| How is work assigned, reviewed, and merged? | `docs/WORKFLOW.md` |
+| How is a new experiment recorded? | `docs/experiments/README.md` |
 
 `docs/FORMAT.md` outranks the code. If they disagree, the code is wrong.
+
+## Repository workflow
+
+BRP's repository-local branching model in `docs/WORKFLOW.md` is authoritative for this project.
+**Do not invoke or follow the machine-wide `codex-project-workflow:release-git-flow` skill for
+BRP.** Its permanent `develop` and release-only `main` model conflicts with this repository. This
+exception does not apply to `codex-project-workflow:project-context-optimizer` or to any unrelated
+globally required skill.
+
+GitHub Issues and pull requests are the source of truth for active work. Repository documents hold
+stable rules and accepted technical knowledge. Research workers write independent reports under
+`docs/experiments/runs/`; only the orchestrator changes the conclusions in `docs/EXPERIMENTS.md` or
+the priorities in `docs/ROADMAP.md`.
 
 ## Rules that are easy to violate by accident
 

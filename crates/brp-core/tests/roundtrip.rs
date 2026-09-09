@@ -2,7 +2,8 @@
 
 use brp_core::{
     analyze, decode, encode, ChannelMode, ChannelOptions, CoderChoice, EncodeOptions, FilterChoice,
-    RawImage, RemapChoice};
+    RawImage, RemapChoice,
+};
 
 /// Every block size worth exercising, including ones that do not divide the image evenly.
 const BLOCK_SIZES: &[Option<(u32, u32)>] = &[
