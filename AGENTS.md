@@ -49,9 +49,11 @@ is worth another 1.6 and costs half the decode speed, so it is opt-in.
 
 ## Repository workflow
 
-BRP's repository-local workflow in `docs/WORKFLOW.md` is authoritative for this project. **Do not
-invoke or follow machine-wide custom Git/project workflow skills for BRP.** They do not account for
-BRP's parallel experimental work or temporary format integration branches.
+BRP's repository-local branching model in `docs/WORKFLOW.md` is authoritative for this project.
+**Do not invoke or follow the machine-wide `codex-project-workflow:release-git-flow` skill for
+BRP.** Its permanent `develop` and release-only `main` model conflicts with this repository. This
+exception does not apply to `codex-project-workflow:project-context-optimizer` or to any unrelated
+globally required skill.
 
 GitHub Issues and pull requests are the source of truth for active work. Repository documents hold
 stable rules and accepted technical knowledge. Research workers write independent reports under

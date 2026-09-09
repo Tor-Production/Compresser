@@ -3,9 +3,10 @@
 This document is the repository-local authority for planning, assigning, reviewing, and integrating
 BRP work. It supplements the codec invariants in `AGENTS.md`; it never relaxes them.
 
-Do not invoke or follow machine-wide custom Git/project workflow skills for BRP. Parallel
-experiments, isolated worktrees, and temporary format integration branches make the generic flow a
-bad fit here.
+Do not invoke or follow the machine-wide `codex-project-workflow:release-git-flow` skill for BRP.
+Its permanent `develop` and release-only `main` model conflicts with the branching architecture
+below. This narrow exception does not apply to `codex-project-workflow:project-context-optimizer`
+or to any unrelated globally required skill.
 
 ## Sources of truth
 
@@ -15,7 +16,8 @@ bad fit here.
   transient issue board or PR queue into this repository.
 - `docs/FORMAT.md` is normative for the bitstream. Experimental code and reports cannot change it.
 - `docs/EXPERIMENTS.md` and `docs/ROADMAP.md` contain orchestrator-synthesised conclusions, not
-  concurrent worker notes. Individual runs live under `docs/experiments/runs/`.
+  concurrent worker notes. Each run has one report under `docs/experiments/runs/`; one bounded
+  issue and PR may add multiple related run reports.
 
 ## Roles
 

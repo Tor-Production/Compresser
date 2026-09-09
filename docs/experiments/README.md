@@ -26,16 +26,23 @@ only after each has its own result.
 - Warm-up, repetition, interleaving, and process-affinity choices belong in the run metadata when
   timing matters.
 
-## One report per research PR
+## One report per run
 
-Create `runs/YYYY-MM-DD-issue-NNN-short-slug.md` from `TEMPLATE.md`. A research PR owns its report;
-it does not edit `docs/EXPERIMENTS.md`, `docs/ROADMAP.md`, or `docs/FORMAT.md`. The last file may be
-edited only by an issue explicitly assigned to an accepted format-version branch.
+Every run has exactly one intent and exactly one report. Create
+`runs/YYYY-MM-DD-issue-NNN-intent-short-slug.md` from `TEMPLATE.md`. One bounded research issue,
+branch, and PR may contain multiple related runs and therefore multiple reports. In particular, an
+issue that asks for both historical reproduction and current revalidation submits at least two
+reports through its one PR; it never combines those intents in one report.
+
+A research PR does not edit `docs/EXPERIMENTS.md`, `docs/ROADMAP.md`, or `docs/FORMAT.md`. The last
+file may be edited only by an issue explicitly assigned to an accepted format-version branch.
 
 Before merge, reviewers may request corrections in the report. After merge, treat it as immutable:
-record a material correction or a new measurement in a new report that links and supersedes the old
-one. Keep raw output out of Git when it is large, but give it a stable location, provenance, and
-checksum or content identifier where practical.
+record a material correction or a new measurement in a new report whose `Supersedes` entry points
+to the old one. Do not edit the old report to add a future-facing reverse link; repository search,
+the issue, and the superseding report provide that relationship. Keep raw output out of Git when it
+is large, but give it a stable location, provenance, and checksum or content identifier where
+practical.
 
 Only the orchestrator may synthesise reviewed reports into canonical conclusions in
 `docs/EXPERIMENTS.md` and, when priorities genuinely change, `docs/ROADMAP.md`.

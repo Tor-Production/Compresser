@@ -24,8 +24,9 @@ summary_results: "<stable path or artifact URI>"
 
 ## Question
 
-State one falsifiable question. Historical reproduction and current revalidation require separate
-runs and separate result sections even when one issue requests both.
+State one falsifiable question. This file records one run with exactly one intent. When an issue
+requests both historical reproduction and current revalidation, create separate report files for
+the separate runs; the bounded issue and PR may contain both reports.
 
 ## Method
 
@@ -50,4 +51,3 @@ List threats to reproduction, representativeness, timing validity, and generalis
 
 - Reviewed by: `<reviewer or PR>`
 - Supersedes: `<report path or none>`
-- Superseded by: `<report path or none>`
