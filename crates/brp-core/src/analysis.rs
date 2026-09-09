@@ -5,8 +5,7 @@ use crate::block::{BlockGrid, BlockRect};
 use crate::context::{ContextModel, Plane};
 use crate::error::BrpError;
 use crate::header::{
-    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS,
-    ZERO_BLOCK_BITS,
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
 };
 use crate::image::{required_len, MAX_CHANNELS};
 use crate::predict::{FilterLayout, FILTER_KINDS, FILTER_KIND_BITS};

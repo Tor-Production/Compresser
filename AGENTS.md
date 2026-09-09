@@ -42,8 +42,21 @@ is worth another 1.6 and costs half the decode speed, so it is opt-in.
 | Why is it this way? | `docs/adr/` |
 | What have we measured? | `docs/EXPERIMENTS.md` |
 | What comes next, and why in that order? | `docs/ROADMAP.md` |
+| How is work assigned, reviewed, and merged? | `docs/WORKFLOW.md` |
+| How is a new experiment recorded? | `docs/experiments/README.md` |
 
 `docs/FORMAT.md` outranks the code. If they disagree, the code is wrong.
+
+## Repository workflow
+
+BRP's repository-local workflow in `docs/WORKFLOW.md` is authoritative for this project. **Do not
+invoke or follow machine-wide custom Git/project workflow skills for BRP.** They do not account for
+BRP's parallel experimental work or temporary format integration branches.
+
+GitHub Issues and pull requests are the source of truth for active work. Repository documents hold
+stable rules and accepted technical knowledge. Research workers write independent reports under
+`docs/experiments/runs/`; only the orchestrator changes the conclusions in `docs/EXPERIMENTS.md` or
+the priorities in `docs/ROADMAP.md`.
 
 ## Rules that are easy to violate by accident
 

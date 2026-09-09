@@ -10,8 +10,7 @@ use crate::context::{ContextModel, Plane};
 use crate::encode::sample_index;
 use crate::error::BrpError;
 use crate::header::{
-    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS,
-    ZERO_BLOCK_BITS,
+    Header, BLOCK_CODER_CONTEXT, BLOCK_CODER_RICE, WIDTH_CODE_BITS, ZERO_BLOCK_BITS,
 };
 use crate::image::{required_len, RawImage, MAX_CHANNELS};
 use crate::predict::{self, FilterLayout, FILTER_KINDS, FILTER_KIND_BITS};

@@ -60,7 +60,6 @@ pub enum BrpError {
     #[error("the alphabet map section is present but maps nothing")]
     AlphabetSectionEmpty,
 
-
     #[error("rank {rank} is outside an alphabet of {size} values")]
     AlphabetRankOutOfRange { rank: u8, size: usize },
 

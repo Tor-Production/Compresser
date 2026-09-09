@@ -296,7 +296,8 @@ pub fn undo_in_place(
                     } else {
                         0
                     };
-                    data[i] = unzigzag(data[i]).wrapping_add(predict(kind, left, above, upper_left));
+                    data[i] =
+                        unzigzag(data[i]).wrapping_add(predict(kind, left, above, upper_left));
                     i += stride;
                 }
             }

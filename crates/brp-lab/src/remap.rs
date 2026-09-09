@@ -229,7 +229,11 @@ mod tests {
         let c = census(&img);
         assert_eq!(c[0].missing(), 240);
         assert_eq!(c[0].interior_gaps(), 0);
-        assert_eq!(plan(&c, 1).touched(), 0, "nothing to gain, so leave it alone");
+        assert_eq!(
+            plan(&c, 1).touched(),
+            0,
+            "nothing to gain, so leave it alone"
+        );
         assert_eq!(
             plan_by(&c, Criterion::Missing, 1).touched(),
             1,

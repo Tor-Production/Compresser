@@ -120,11 +120,7 @@ fn grid_name(g: u32) -> String {
 /// Every scheme a class table has a row for, in the order it prints them.
 fn schemes(row: &Row) -> Vec<(String, u64, bool)> {
     let mut v = vec![("whole".to_string(), row.whole, true)];
-    v.extend(
-        GRIDS
-            .iter()
-            .map(|&g| (grid_name(g), row.bits_at(g), false)),
-    );
+    v.extend(GRIDS.iter().map(|&g| (grid_name(g), row.bits_at(g), false)));
     v.push(("quadtree".to_string(), row.quadtree, false));
     v.push(("32/64".to_string(), row.tree_32_64, false));
     v.push(("32/64+bit".to_string(), row.tree_optout, false));
@@ -247,7 +243,12 @@ fn print_class(label: &str, rows: &[&Row]) {
 
     let corpus_raw: usize = rows.iter().map(|r| r.raw).sum();
     println!("\n  bits as a share of raw samples, %");
-    println!("  {:<12}{}  {:>9}", "scheme", stats::SUMMARY_HEADER, "corpus");
+    println!(
+        "  {:<12}{}  {:>9}",
+        "scheme",
+        stats::SUMMARY_HEADER,
+        "corpus"
+    );
     for (i, (name, _, control)) in schemes(first).into_iter().enumerate() {
         let per_image: Vec<u64> = rows.iter().map(|r| schemes(r)[i].1).collect();
         let ratios: Vec<f64> = rows
@@ -350,7 +351,11 @@ fn print_timing(rows: &[Row]) {
         ("one grid, exact (control)", one, "1"),
         ("exact, five candidates", sum(&|t| t.exact_five), "5"),
         ("exact, 8x8 vs 16x16", sum(&|t| t.exact_two), "2"),
-        ("estimated, five candidates", sum(&|t| t.estimated_five), "5"),
+        (
+            "estimated, five candidates",
+            sum(&|t| t.estimated_five),
+            "5",
+        ),
     ] {
         println!(
             "  {name:<28}  {total:>10.0}  {:>10.1}  {candidates:>10}",

@@ -330,7 +330,8 @@ pub fn plan(data: &[u8], stride: usize, choice: RemapChoice) -> AlphabetMaps {
         // times over. Both halves matter: a photograph missing twenty values in the middle of a
         // full range gains nothing measurable (finding 17) and would still carry a table, and a
         // tiny image cannot amortise one at all.
-        let narrowing = u64::from(bit_length(map.hi - map.lo) - bit_length(map.alphabet_size() as u8 - 1));
+        let narrowing =
+            u64::from(bit_length(map.hi - map.lo) - bit_length(map.alphabet_size() as u8 - 1));
         if narrowing == 0 || samples * narrowing < 4 * map.byte_len() as u64 * 8 {
             continue;
         }

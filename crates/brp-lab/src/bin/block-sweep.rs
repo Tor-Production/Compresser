@@ -137,7 +137,8 @@ fn measure_sizes(img: &RawImage, coder: CoderChoice) -> Result<Vec<(Size, usize)
         let Some(block) = size.dimensions(img.width(), img.height()) else {
             continue;
         };
-        let bytes = brp_core::encode(img, &options(block, coder)).map_err(|e| anyhow::anyhow!(e))?;
+        let bytes =
+            brp_core::encode(img, &options(block, coder)).map_err(|e| anyhow::anyhow!(e))?;
         let back = brp_core::decode(&bytes)
             .map_err(|e| anyhow::anyhow!(e))
             .with_context(|| format!("{} failed to decode", size.short()))?;
@@ -161,10 +162,7 @@ struct Row {
 
 impl Row {
     fn bytes_at(&self, size: Size) -> Option<usize> {
-        self.cells
-            .iter()
-            .find(|(s, _)| *s == size)
-            .map(|(_, b)| *b)
+        self.cells.iter().find(|(s, _)| *s == size).map(|(_, b)| *b)
     }
 
     fn ratio_at(&self, size: Size) -> Option<f64> {
@@ -195,7 +193,12 @@ fn print_image(row: &Row) {
         row.class
     );
     println!("  {:<14}  {:>8}  {:>9}", "block", "size", "of raw");
-    let best = row.cells.iter().map(|(_, b)| *b).min().unwrap_or(usize::MAX);
+    let best = row
+        .cells
+        .iter()
+        .map(|(_, b)| *b)
+        .min()
+        .unwrap_or(usize::MAX);
     for (size, bytes) in &row.cells {
         let mark = if *bytes == best { " <" } else { "" };
         let control = if size.is_control() { " (control)" } else { "" };
@@ -231,7 +234,12 @@ fn print_class(label: &str, rows: &[&Row]) {
 
     // What each block size costs, as a distribution over the class rather than one number.
     println!("\n  size as a share of the image's own raw samples, %");
-    println!("  {:<10}{}  {:>9}", "block", stats::SUMMARY_HEADER, "corpus");
+    println!(
+        "  {:<10}{}  {:>9}",
+        "block",
+        stats::SUMMARY_HEADER,
+        "corpus"
+    );
     let corpus_raw: usize = rows.iter().map(|r| r.raw).sum();
     for size in sizes() {
         let ratios: Vec<f64> = rows.iter().filter_map(|r| r.ratio_at(size)).collect();

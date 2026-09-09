@@ -23,12 +23,11 @@
 //!
 //! Nothing here is part of the format. See `docs/FORMAT.md` for what a `.brp` file is.
 
-use anyhow::{bail, Result};
 use crate::predictors::{self, Variant};
+use anyhow::{bail, Result};
 use brp_core::{
-    plan_channels, unzigzag, BitReader, BitWriter, BlockGrid,
-    BlockRect, ChannelMode, ChannelOptions, ChannelPlan, CodedIndices, RawImage,
-    MAX_CHANNELS,
+    plan_channels, unzigzag, BitReader, BitWriter, BlockGrid, BlockRect, ChannelMode,
+    ChannelOptions, ChannelPlan, CodedIndices, RawImage, MAX_CHANNELS,
 };
 
 const BIT_DEPTH: u32 = 8;
@@ -641,7 +640,11 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
     let stride = usize::from(img.channels());
     let plan = plan_channels(img.data(), img.channels(), &ChannelOptions::default());
     let coded = plan.coded_indices();
-    let predictor = if coded.is_empty() { None } else { opts.predictor };
+    let predictor = if coded.is_empty() {
+        None
+    } else {
+        opts.predictor
+    };
     assert!(
         opts.source != ContextSource::Sample
             || predictor.is_none()
@@ -653,7 +656,8 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
     // changes only the model measures the model and nothing else.
     let (kinds, residuals) = match predictor {
         Some(v) => {
-            let (k, r) = predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
+            let (k, r) =
+                predictors::apply(v, img.data(), img.width(), img.height(), stride, &coded);
             (k, Some(r))
         }
         None => (Vec::new(), None),
@@ -670,9 +674,7 @@ fn encode_inner(img: &RawImage, opts: &Options, mut trace: Option<&mut Trace>) -
     out.push(img.channels());
     out.extend_from_slice(&predictors::code(predictor));
     out.push(
-        u8::from(opts.base) << 1
-            | u8::from(opts.escape) << 2
-            | u8::from(opts.per_channel) << 3,
+        u8::from(opts.base) << 1 | u8::from(opts.escape) << 2 | u8::from(opts.per_channel) << 3,
     );
     out.push(opts.source.code());
     out.push(opts.thresholds.t1);

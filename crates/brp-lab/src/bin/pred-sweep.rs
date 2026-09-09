@@ -51,7 +51,10 @@ struct Corpus {
 /// `PRED_SHORT=1` keeps the control and the five rows the full sweep points at, which is what a
 /// corpus of one 130 MiB photograph can be asked for in reasonable time.
 fn candidates() -> Vec<Variant> {
-    if std::env::var("PRED_SHORT").map(|v| v != "0").unwrap_or(false) {
+    if std::env::var("PRED_SHORT")
+        .map(|v| v != "0")
+        .unwrap_or(false)
+    {
         return vec![
             Variant::shipped(),
             Variant::Fixed(predictors::GAP),
@@ -452,7 +455,10 @@ fn shipped_throughput_table(corpus: &Corpus) {
         }));
     }
 
-    println!("  {}, the format itself, MiB/s over raw samples", corpus.name);
+    println!(
+        "  {}, the format itself, MiB/s over raw samples",
+        corpus.name
+    );
     println!(
         "  {:<42}  {:>12}  {:>12}  {:>8}",
         "configuration", "encode", "decode", "size"
@@ -565,7 +571,10 @@ fn main() -> Result<()> {
     ] {
         let mut cells = String::new();
         for c in &corpora {
-            cells.push_str(&format!("  {:>7.2}%", percent(baseline_size(c, &opts)?, c.raw)));
+            cells.push_str(&format!(
+                "  {:>7.2}%",
+                percent(baseline_size(c, &opts)?, c.raw)
+            ));
         }
         row(&label, cells);
     }
@@ -604,32 +613,34 @@ fn main() -> Result<()> {
 
     // A predictor that never gets picked is not a predictor the format needs.
     if sizes {
-    println!("What the seven-kind menu picks, in percent of samples covered");
-    println!(
-        "  {:<20}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}",
-        "corpus / scope", "none", "sub", "up", "avg", "paeth", "med", "gap"
-    );
-    println!("  {:-<1$}", "", 76);
-    for c in &corpora {
-        for scope in [Scope::Row, Scope::Block(16)] {
-            let variant = Variant::Choice {
-                scope,
-                menu: Menu::Png7,
-            };
-            let shares = kind_shares(c, variant);
-            let mut cells = String::new();
-            for s in shares {
-                cells.push_str(&format!("{s:>7.1} "));
+        println!("What the seven-kind menu picks, in percent of samples covered");
+        println!(
+            "  {:<20}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}",
+            "corpus / scope", "none", "sub", "up", "avg", "paeth", "med", "gap"
+        );
+        println!("  {:-<1$}", "", 76);
+        for c in &corpora {
+            for scope in [Scope::Row, Scope::Block(16)] {
+                let variant = Variant::Choice {
+                    scope,
+                    menu: Menu::Png7,
+                };
+                let shares = kind_shares(c, variant);
+                let mut cells = String::new();
+                for s in shares {
+                    cells.push_str(&format!("{s:>7.1} "));
+                }
+                println!("  {:<20}{cells}", format!("{} {}", c.name, variant.name()));
             }
-            println!("  {:<20}{cells}", format!("{} {}", c.name, variant.name()));
         }
-    }
-    println!();
+        println!();
     }
 
     if std::env::var("PRED_TIME").map(|v| v != "0").unwrap_or(true) {
         println!("Throughput");
-        println!("  Best of {ROUNDS} interleaved rounds; +- is how far the worst round fell short.");
+        println!(
+            "  Best of {ROUNDS} interleaved rounds; +- is how far the worst round fell short."
+        );
         println!("  A fixed predictor removes the encoder's search and changes the decoder's");
         println!("  unprediction pass; nothing else about either coder moves.\n");
         let timed: Vec<(Coder, Variant)> = [Coder::Rice, Coder::Context]
